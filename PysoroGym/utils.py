@@ -27,15 +27,12 @@ def rotation_matrix_from_axis_angle(axis, angle):
     c = np.cos(angle)
     s = np.sin(angle)
     t = 1 - c
-    
-    # Rodrigues' rotation formula
-    R = np.array([
-        [c + x*x*t,     x*y*t - z*s,  x*z*t + y*s],
-        [y*x*t + z*s,   c + y*y*t,    y*z*t - x*s],
-        [z*x*t - y*s,   z*y*t + x*s,  c + z*z*t]
+    x, y, z = axis
+    return np.array([
+        [t*x*x + c,   t*x*y - s*z, t*x*z + s*y],
+        [t*x*y + s*z, t*y*y + c,   t*y*z - s*x],
+        [t*x*z - s*y, t*y*z + s*x, t*z*z + c]
     ])
-    
-    return R
 
 
 def rotation_matrix_from_quaternion(q):
@@ -137,3 +134,13 @@ def transform_direction(direction, rotation_matrix):
         Direction in world coordinates
     """
     return rotation_matrix @ direction
+
+
+def quat_to_rot_matrix(q):
+    """Converts a quaternion (w, x, y, z) to a 3x3 rotation matrix."""
+    w, x, y, z = q
+    return np.array([
+        [1 - 2*y*y - 2*z*z,     2*x*y - 2*z*w,     2*x*z + 2*y*w],
+        [    2*x*y + 2*z*w, 1 - 2*x*x - 2*z*z,     2*y*z - 2*x*w],
+        [    2*x*z - 2*y*w,     2*y*z + 2*x*w, 1 - 2*x*x - 2*y*y]
+    ])

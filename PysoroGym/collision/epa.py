@@ -237,6 +237,12 @@ def epa(shape_a, shape_b, simplex, max_iterations=64, epsilon=1e-6):
             new_faces.append(Face(edge[0], edge[1], new_idx, vertices))
         
         faces = new_faces
+        
+        # Safety check: if no faces remain, return a fallback result
+        if not faces:
+            # This can happen with degenerate cases or numerical precision issues
+            # Return a minimal penetration along the y-axis (common for ground contact)
+            return np.array([0.0, 1.0, 0.0]), 0.001, vertices[0], vertices[0] + np.array([0.0, 0.001, 0.0])
     
     # Max iterations reached - return best estimate
     closest_face = min(faces, key=lambda face: face.distance)

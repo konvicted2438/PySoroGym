@@ -139,7 +139,9 @@ class Box(ConvexShape):
         self.normals = normals
 
     def support(self, d):
-        return np.sign(d) * self.h
+        """Return furthest point in direction d by checking all vertices."""
+        dots = np.dot(self.vertices, d)
+        return self.vertices[np.argmax(dots)]
 
     def inertia(self, m):
         x, y, z = self.h * 2  # Full lengths
@@ -215,25 +217,33 @@ class Cylinder(ConvexShape):
         self.normals = np.array(normals, dtype=float)
 
     def support(self, d):
-        # Project d onto the xz plane
-        
+        """
+        Returns the point on the cylinder furthest in a given direction.
+        This is found by comparing the support of the cylindrical wall and the support of the top/bottom caps.
+        """
+        # Support point on the cylindrical wall (ignoring caps)
         d_xz = np.array([d[0], 0, d[2]])
         n_xz = np.linalg.norm(d_xz)
         
-        if n_xz < 1e-10:
-            # d is along y axis
-            return np.array([0, self.half_height if d[1] > 0 else -self.half_height, 0])
+        if n_xz > 1e-9:
+            # Point on the side of the cylinder
+            p_side = (d_xz / n_xz) * self.r
+            p_side[1] = self.half_height if d[1] > 0 else -self.half_height
+        else:
+            # Direction is purely along Y, support is on the cap center
+            p_side = np.array([0, self.half_height if d[1] > 0 else -self.half_height, 0])
 
-        # Normalize the xz component
-        d_xz = d_xz / n_xz
-        
-        # Get the furthest point on the circular face in xz direction
-        p = np.array([d_xz[0] * self.r, 0, d_xz[2] * self.r])
-        
-        # Add the y component based on d's y sign
-        p[1] = self.h/2 if d[1] > 0 else -self.h/2
-        
-        return p
+        # Support point on the top/bottom caps (a point on the rim)
+        p_caps = np.array([0.0, self.half_height if d[1] > 0 else -self.half_height, 0.0])
+        if n_xz > 1e-9:
+            p_caps[0] = (d[0] / n_xz) * self.r
+            p_caps[2] = (d[2] / n_xz) * self.r
+
+        # Return the point that is further in direction d
+        if np.dot(p_side, d) > np.dot(p_caps, d):
+            return p_side
+        else:
+            return p_caps
 
     def inertia(self, m):
         # Cylinder formulas

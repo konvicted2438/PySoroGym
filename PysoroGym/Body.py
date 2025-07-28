@@ -40,6 +40,9 @@ class Body:
         self.J_local = np.array([1.0, 1.0, 1.0], float)  # default unit inertia
         self.J_local_inv = 1.0 / self.J_local            # cached inverse
         
+        # Add world-space inverse inertia tensor attribute
+        self._inv_inertia_world = None  # Cached world-space inverse inertia
+        
         # accumulators
         self.force_acc = np.zeros(3, float)
         self.torque_acc = np.zeros(3, float)
@@ -132,9 +135,19 @@ class Body:
     # ––––– Integration –––––
     def inv_inertia_world(self):
         """Return 3×3 inverse inertia tensor in world coords."""
+        if self.body_type == Body.STATIC:
+            # Static bodies have infinite inertia (zero inverse)
+            return np.zeros((3, 3))
+        
         R = q_to_mat3(self.q)
-        return R @ np.diag(self.J_local_inv) @ R.T
+        self._inv_inertia_world = R @ np.diag(self.J_local_inv) @ R.T
+        return self._inv_inertia_world
     
+    @property
+    def inv_inertia(self):
+        """Property to access world-space inverse inertia tensor."""
+        return self.inv_inertia_world()
+
     def integrate_velocities(self, dt):
         """First integration step: forces → velocities."""
         if self.is_static or self.is_sleeping:
@@ -178,3 +191,44 @@ class Body:
             
         self.integrate_velocities(dt)
         self.integrate_positions(dt)
+    
+    # ––––– Transformations –––––
+    def transform_point(self, local_point):
+        """
+        Transform a point from local to world coordinates.
+        
+        Parameters
+        ----------
+        local_point : array_like, shape (3,)
+            Point in local coordinates
+            
+        Returns
+        -------
+        world_point : ndarray, shape (3,)
+            Point in world coordinates
+        """
+        # Get rotation matrix from quaternion
+        R = q_to_mat3(self.q)
+        
+        # Transform: rotate then translate
+        return R @ local_point + self.pos
+        
+    def transform_direction(self, local_dir):
+        """
+        Transform a direction vector from local to world coordinates.
+        
+        Parameters
+        ----------
+        local_dir : array_like, shape (3,)
+            Direction in local coordinates
+            
+        Returns
+        -------
+        world_dir : ndarray, shape (3,)
+            Direction in world coordinates
+        """
+        # Get rotation matrix from quaternion
+        R = q_to_mat3(self.q)
+        
+        # Only rotate, no translation
+        return R @ local_dir

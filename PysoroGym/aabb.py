@@ -22,7 +22,10 @@ class AABB:
     
     def overlaps(self, other):
         """Check if this AABB overlaps with another"""
-        return np.all(self.min_point <= other.max_point) and np.all(other.min_point <= self.max_point)
+        # Fixed: ensure we check all dimensions properly
+        return (self.min_point[0] <= other.max_point[0] and self.max_point[0] >= other.min_point[0] and
+                self.min_point[1] <= other.max_point[1] and self.max_point[1] >= other.min_point[1] and
+                self.min_point[2] <= other.max_point[2] and self.max_point[2] >= other.min_point[2])
     
     def contains(self, point):
         """Check if point is inside AABB"""
@@ -95,7 +98,7 @@ class AABBTree:
         if self.root is None:
             self.root = node
         else:
-            # Find best sibling
+            # Find best sibling using volume heuristic (similar to distance3d)
             sibling = self._find_best_sibling(node)
             
             # Create new parent
@@ -124,7 +127,7 @@ class AABBTree:
                 self.root = new_parent
             
             # Walk back up and refit AABBs
-            self._refit(new_parent)
+            self._refit(new_parent.parent)
         
         return node
     
@@ -151,7 +154,7 @@ class AABBTree:
                 parent.parent.right = sibling
             sibling.parent = parent.parent
             
-            # Refit from sibling up
+            # Refit from sibling's parent up
             self._refit(sibling.parent)
         else:
             # Parent was root
@@ -204,8 +207,27 @@ class AABBTree:
                 # Shape can compute its own AABB
                 shape_aabb = shape.get_aabb(pos, rot)
                 aabb.expand_by_aabb(shape_aabb)
+            elif hasattr(shape, 'aabb_min') and hasattr(shape, 'aabb_max'):
+                # Shape has precomputed local AABB
+                # Transform local AABB to world space
+                local_min = shape.aabb_min
+                local_max = shape.aabb_max
+                
+                # Get all 8 corners of local AABB
+                corners = []
+                for x in [local_min[0], local_max[0]]:
+                    for y in [local_min[1], local_max[1]]:
+                        for z in [local_min[2], local_max[2]]:
+                            corner = np.array([x, y, z])
+                            # Transform to world space
+                            world_corner = body.transform_point(corner)
+                            corners.append(world_corner)
+                
+                # Expand AABB to include all corners
+                for corner in corners:
+                    aabb.expand(corner)
             else:
-                # Simple approach - use bounding sphere
+                # Fallback - use bounding sphere
                 if hasattr(shape, 'radius'):
                     radius = shape.radius
                 elif hasattr(shape, 'size'):
@@ -217,66 +239,44 @@ class AABBTree:
                 aabb.expand(pos - radius)
                 aabb.expand(pos + radius)
         
-        # Add margin
+        # Add margin for stability
         aabb.min_point -= self.margin
         aabb.max_point += self.margin
         
         return aabb
     
     def _find_best_sibling(self, node):
-        """Find the best sibling for a new node using SAH (Surface Area Heuristic)"""
+        """Find the best sibling for a new node using volume heuristic"""
+        # Start with root
         best = self.root
-        best_cost = self._compute_cost(self.root, node)
         
-        # Queue for traversal
-        queue = [self.root]
+        # Use a simple traversal (can be optimized with SAH later)
+        stack = [self.root]
+        best_cost = float('inf')
         
-        while queue:
-            current = queue.pop(0)
+        while stack:
+            current = stack.pop()
             
-            cost = self._compute_cost(current, node)
+            # Cost of creating a new parent for current and node
+            merged_aabb = current.aabb.merge(node.aabb)
+            cost = merged_aabb.volume()
+            
             if cost < best_cost:
                 best_cost = cost
                 best = current
             
-            # Don't traverse deeper if cost can't improve
+            # Don't traverse into leaves
             if not current.is_leaf():
-                inherited_cost = self._inherited_cost(current, node)
-                
-                if inherited_cost + self._lower_bound_cost(current.left) < best_cost:
-                    queue.append(current.left)
-                    
-                if inherited_cost + self._lower_bound_cost(current.right) < best_cost:
-                    queue.append(current.right)
+                stack.append(current.left)
+                stack.append(current.right)
         
         return best
-    
-    def _compute_cost(self, node, new_node):
-        """Compute cost of inserting new_node as sibling of node"""
-        merged = node.aabb.merge(new_node.aabb)
-        return merged.surface_area()
-    
-    def _inherited_cost(self, node, new_node):
-        """Cost inherited from ancestors when inserting"""
-        cost = 0.0
-        current = node
-        
-        while current.parent is not None:
-            parent_aabb = current.parent.aabb
-            new_parent_aabb = parent_aabb.merge(new_node.aabb)
-            cost += new_parent_aabb.surface_area() - parent_aabb.surface_area()
-            current = current.parent
-            
-        return cost
-    
-    def _lower_bound_cost(self, node):
-        """Lower bound on cost for a subtree"""
-        return node.aabb.surface_area()
     
     def _refit(self, node):
         """Refit AABBs from node up to root"""
         while node is not None:
             if not node.is_leaf():
+                # Recompute AABB from children
                 node.aabb = node.left.aabb.merge(node.right.aabb)
                 node.height = 1 + max(node.left.height, node.right.height)
             node = node.parent
@@ -285,51 +285,49 @@ class AABBTree:
         """Recursively find all overlapping pairs"""
         if node.is_leaf():
             return
-            
-        # Check if children overlap
-        if node.left.aabb.overlaps(node.right.aabb):
-            if node.left.is_leaf() and node.right.is_leaf():
-                # Both are leaves, add pair
-                pairs.append((node.left.body, node.right.body))
-            elif node.left.is_leaf():
-                # Left is leaf, traverse right
-                self._check_leaf_against_tree(node.left, node.right, pairs)
-            elif node.right.is_leaf():
-                # Right is leaf, traverse left
-                self._check_leaf_against_tree(node.right, node.left, pairs)
-            else:
-                # Both are internal nodes
-                self._query_pairs_recursive(node.left, pairs)
-                self._query_pairs_recursive(node.right, pairs)
-                self._check_tree_against_tree(node.left, node.right, pairs)
         
-        # Continue traversal
-        if not node.left.is_leaf():
+        # Recurse into children
+        if node.left is not None:
             self._query_pairs_recursive(node.left, pairs)
-        if not node.right.is_leaf():
+        if node.right is not None:
             self._query_pairs_recursive(node.right, pairs)
+        
+        # Check pairs between left and right subtrees
+        if node.left is not None and node.right is not None:
+            self._check_subtree_pairs(node.left, node.right, pairs)
     
-    def _check_leaf_against_tree(self, leaf, tree, pairs):
-        """Check a leaf node against all nodes in a subtree"""
-        if tree.is_leaf():
-            if leaf.aabb.overlaps(tree.aabb) and leaf.body != tree.body:
-                pairs.append((leaf.body, tree.body))
+    def _check_subtree_pairs(self, node1, node2, pairs):
+        """Check for overlapping pairs between two subtrees"""
+        # Check if AABBs overlap
+        if not node1.aabb.overlaps(node2.aabb):
+            return
+        
+        # If both are leaves, add pair
+        if node1.is_leaf() and node2.is_leaf():
+            if node1.body != node2.body:  # Don't self-collide
+                pairs.append((node1.body, node2.body))
+        elif node1.is_leaf():
+            # node1 is leaf, recurse into node2
+            if node2.left is not None:
+                self._check_subtree_pairs(node1, node2.left, pairs)
+            if node2.right is not None:
+                self._check_subtree_pairs(node1, node2.right, pairs)
+        elif node2.is_leaf():
+            # node2 is leaf, recurse into node1
+            if node1.left is not None:
+                self._check_subtree_pairs(node1.left, node2, pairs)
+            if node1.right is not None:
+                self._check_subtree_pairs(node1.right, node2, pairs)
         else:
-            if leaf.aabb.overlaps(tree.left.aabb):
-                self._check_leaf_against_tree(leaf, tree.left, pairs)
-            if leaf.aabb.overlaps(tree.right.aabb):
-                self._check_leaf_against_tree(leaf, tree.right, pairs)
-    
-    def _check_tree_against_tree(self, tree1, tree2, pairs):
-        """Check all nodes in tree1 against all nodes in tree2"""
-        if tree1.aabb.overlaps(tree2.aabb):
-            if tree1.is_leaf():
-                self._check_leaf_against_tree(tree1, tree2, pairs)
-            elif tree2.is_leaf():
-                self._check_leaf_against_tree(tree2, tree1, pairs)
-            else:
-                self._check_tree_against_tree(tree1.left, tree2, pairs)
-                self._check_tree_against_tree(tree1.right, tree2, pairs)
+            # Both are branches, recurse into all combinations
+            if node1.left is not None and node2.left is not None:
+                self._check_subtree_pairs(node1.left, node2.left, pairs)
+            if node1.left is not None and node2.right is not None:
+                self._check_subtree_pairs(node1.left, node2.right, pairs)
+            if node1.right is not None and node2.left is not None:
+                self._check_subtree_pairs(node1.right, node2.left, pairs)
+            if node1.right is not None and node2.right is not None:
+                self._check_subtree_pairs(node1.right, node2.right, pairs)
     
     def _query_aabb_recursive(self, node, aabb, bodies):
         """Recursively find all bodies whose AABBs overlap with given AABB"""
@@ -339,5 +337,7 @@ class AABBTree:
         if node.is_leaf():
             bodies.append(node.body)
         else:
-            self._query_aabb_recursive(node.left, aabb, bodies)
-            self._query_aabb_recursive(node.right, aabb, bodies)
+            if node.left is not None:
+                self._query_aabb_recursive(node.left, aabb, bodies)
+            if node.right is not None:
+                self._query_aabb_recursive(node.right, aabb, bodies)

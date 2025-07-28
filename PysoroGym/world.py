@@ -126,7 +126,18 @@ class World:
     def _solve_collisions(self):
         """Apply impulses to resolve collisions."""
         for contact in self.contacts:
+            # Debug print before resolving contact
+            print(f"\nBEFORE RESOLUTION:")
+            print(f"Body A ({type(contact.shape_a.shape).__name__}): pos={contact.body_a.pos}, vel={contact.body_a.vel}")
+            print(f"Body B ({type(contact.shape_b.shape).__name__}): pos={contact.body_b.pos}, vel={contact.body_b.vel}")
+            print(f"Normal: {contact.normal}, Depth: {contact.depth}")
+            
             resolve_contact(contact, self.dt)
+            
+            # Debug print after resolving contact
+            print(f"\nAFTER RESOLUTION:")
+            print(f"Body A ({type(contact.shape_a.shape).__name__}): pos={contact.body_a.pos}, vel={contact.body_a.vel}")
+            print(f"Body B ({type(contact.shape_b.shape).__name__}): pos={contact.body_b.pos}, vel={contact.body_b.vel}")
     
     def _update_sleeping_bodies(self):
         """Check and update sleep state of bodies for performance."""
@@ -181,7 +192,7 @@ class World:
                 rs = RenderShape()
                 rs.position = body.position
                 rs.rotation = body.rotation
-                rs.shape = shape_collider  # Fixed: shape_collider is already the shape
+                rs.shape = shape_collider.shape  # Fixed: shape_collider is already the shape
                 
                 # Set color based on body type
                 if body.is_static:

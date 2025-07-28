@@ -55,21 +55,22 @@ def main():
     
     
     #Add a few spheres
-    # for i in range(1):
-    #     sphere = Body(mass=1.0, position=(i*0.1, 2 + i*2.5, 0),body_type=Body.STATIC)
-    #     sphere_shape = Sphere(radius=0.5)
-    #     sphere.add_shape(sphere_shape)
-    #     world.add(sphere)
+    for i in range(1):
+        sphere = Body(mass=1.0, position=(i*0.1, 2 + i*2.5, 0))
+        sphere_shape = Sphere(radius=0.5)
+        sphere.add_shape(sphere_shape)
+        world.add(sphere)
     
     # Add a cylinder
     # cylinder = Body(mass=2.0, position=(3, 7, 2))
     # cylinder_shape = Cylinder(radius=0.7, height=1.5)
     # cylinder.add_shape(cylinder_shape)
     # world.add(cylinder)
-    for i in range(2):
-
+    for i in range(1):
+        
         box = Body(mass=1.5, position=(0, 10+i*2.5, 0), angular_velocity=(1,1,1))
-        box_shape = Box([1.0, 1.0, 1.0])
+        box_size = [1.0, 1.0, 1.0]
+        box_shape = Box(box_size) # Pass the list directly
         box.add_shape(box_shape)
         world.add(box)
     

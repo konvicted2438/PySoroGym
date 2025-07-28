@@ -13,7 +13,7 @@ from PysoroGym.collision.collision import detect_collision
 
 # Import shapes and bodies
 from PysoroGym.Body import Body
-from PysoroGym.Shape import Box, Sphere, Cylinder, Polyhedron
+from PysoroGym.Shape import Box, Sphere, Cylinder, Polyhedron, Plane
 
 print("=== Testing Collision Detection for All Shape Combinations ===\n")
 
@@ -240,6 +240,66 @@ body24.add_shape(box9)
 
 test_collision(body23.shapes[0], body24.shapes[0], body23, body24, "Rotated Cylinder", "Box", expected_collision=True)
 
+# Test 13: Rotated Box vs Rotated Box
+print("\n\n=== Test 13: Rotated Box vs Rotated Box ===")
+angle_y_30 = np.pi / 6
+body25 = Body(position=(0, 0, 0), orientation=(np.cos(angle_y_30/2), 0, np.sin(angle_y_30/2), 0)) # Rotated 30 deg on y-axis
+box10 = Box(half_extents=[1, 1, 1])
+body25.add_shape(box10)
+
+body26 = Body(position=(1.0, 0, 0), orientation=(np.cos(-angle_y_30/2), 0, np.sin(-angle_y_30/2), 0)) # Rotated -30 deg on y-axis
+box11 = Box(half_extents=[1, 1, 1])
+body26.add_shape(box11)
+
+test_collision(body25.shapes[0], body26.shapes[0], body25, body26, "Rotated Box", "Rotated Box", expected_collision=True)
+
+# Test 14: Box vs Horizontal Plane
+print("\n\n=== Test 14: Box vs Horizontal Plane ===")
+# Create a horizontal ground plane
+ground_body = Body(position=(0, 0, 0), body_type=Body.STATIC)
+ground_plane = Plane(size=[10, 10])  # Size is the extent of the plane visualization
+ground_body.add_shape(ground_plane)
+
+# Create a box slightly penetrating the plane (box centered at y=0.5, half-height=1)
+box_body = Body(position=(0, 0.5, 0))
+box_shape = Box(half_extents=[1, 1, 1])
+box_body.add_shape(box_shape)
+
+test_collision(ground_body.shapes[0], box_body.shapes[0], ground_body, box_body, "Plane", "Box", expected_collision=True)
+
+# Test 15: Box vs Angled Plane
+print("\n\n=== Test 15: Box vs Angled Plane ===")
+# Create an angled plane (rotated 30 degrees around x-axis)
+angled_plane_body = Body(position=(0, 0, 0), body_type=Body.STATIC)
+angled_plane_body.Q = rotation_matrix_from_axis_angle(np.array([1, 0, 0]), np.pi/6)
+angled_plane = Plane(size=[10, 10])
+angled_plane_body.add_shape(angled_plane)
+
+# Position a box to intersect with the angled plane
+angled_box_body = Body(position=(0, 0.5, 0.5))
+angled_box_shape = Box(half_extents=[1, 1, 1])
+angled_box_body.add_shape(angled_box_shape)
+
+test_collision(angled_plane_body.shapes[0], angled_box_body.shapes[0], angled_plane_body, angled_box_body, "Angled Plane", "Box", expected_collision=True)
+
+# Test 16: Polyhedron vs Plane
+print("\n\n=== Test 16: Polyhedron vs Plane ===")
+# Create a tetrahedron positioned to intersect with the ground plane
+tetra_body = Body(position=(0, 0.5, 0))
+tetra_shape = Polyhedron(vertices=vertices1, indices=indices1)
+tetra_body.add_shape(tetra_shape)
+
+test_collision(ground_body.shapes[0], tetra_body.shapes[0], ground_body, tetra_body, "Plane", "Polyhedron", expected_collision=True)
+
+# Test 17: Non-colliding Box vs Plane
+print("\n\n=== Test 17: Non-colliding Box vs Plane ===")
+# Create a box above the plane with no intersection
+box_above_body = Body(position=(0, 3, 0))
+box_above_shape = Box(half_extents=[1, 1, 1])
+box_above_body.add_shape(box_above_shape)
+
+test_collision(ground_body.shapes[0], box_above_body.shapes[0], ground_body, box_above_body, "Plane", "Box (Above)", expected_collision=False)
+
 # Summary
 print("\n\n=== Test Summary ===")
 print("All shape combinations have been tested:")
@@ -251,6 +311,10 @@ print("- Box-Cylinder ✓")
 print("- Sphere-Cylinder ✓")
 print("- Polyhedron-Box ✓")
 print("- Polyhedron-Polyhedron ✓")
+print("- Rotated Box vs Rotated Box ✓")
+print("- Box vs Plane ✓")
+print("- Angled Box vs Plane ✓")
+print("- Polyhedron vs Plane ✓")
 print("- Non-colliding cases ✓")
 print("- Edge cases (touching) ✓")
 print("- Rotated shapes ✓")
