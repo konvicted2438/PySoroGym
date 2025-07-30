@@ -193,57 +193,41 @@ class AABBTree:
     
     def _compute_body_aabb(self, body):
         """Compute AABB for a body including all its shapes"""
-        aabb = AABB()
+        body_aabb = AABB()
         
-        # Get body transform
-        pos = body.position
-        rot = body.rotation
-        
-        # Compute AABB for each shape
+        # Compute AABB for each shape attached to the body
         for shape_collider in body.shapes:
             shape = shape_collider.shape
             
-            if hasattr(shape, 'get_aabb'):
-                # Shape can compute its own AABB
-                shape_aabb = shape.get_aabb(pos, rot)
-                aabb.expand_by_aabb(shape_aabb)
-            elif hasattr(shape, 'aabb_min') and hasattr(shape, 'aabb_max'):
-                # Shape has precomputed local AABB
-                # Transform local AABB to world space
-                local_min = shape.aabb_min
-                local_max = shape.aabb_max
-                
-                # Get all 8 corners of local AABB
-                corners = []
-                for x in [local_min[0], local_max[0]]:
-                    for y in [local_min[1], local_max[1]]:
-                        for z in [local_min[2], local_max[2]]:
-                            corner = np.array([x, y, z])
-                            # Transform to world space
-                            world_corner = body.transform_point(corner)
-                            corners.append(world_corner)
-                
-                # Expand AABB to include all corners
-                for corner in corners:
-                    aabb.expand(corner)
-            else:
-                # Fallback - use bounding sphere
-                if hasattr(shape, 'radius'):
-                    radius = shape.radius
-                elif hasattr(shape, 'size'):
-                    radius = np.linalg.norm(shape.size) * 0.5
-                else:
-                    radius = 1.0  # Default
-                    
-                # Expand by sphere
-                aabb.expand(pos - radius)
-                aabb.expand(pos + radius)
+            # Get the shape's AABB in its own local space
+            local_aabb = shape.get_local_aabb()
+            
+            # The shape might have an offset from the body's origin
+            offset = shape_collider.offset
+            
+            # Get all 8 corners of the shape's local AABB
+            corners = [
+                np.array([local_aabb.min_point[0], local_aabb.min_point[1], local_aabb.min_point[2]]),
+                np.array([local_aabb.max_point[0], local_aabb.min_point[1], local_aabb.min_point[2]]),
+                np.array([local_aabb.min_point[0], local_aabb.max_point[1], local_aabb.min_point[2]]),
+                np.array([local_aabb.min_point[0], local_aabb.min_point[1], local_aabb.max_point[2]]),
+                np.array([local_aabb.max_point[0], local_aabb.max_point[1], local_aabb.min_point[2]]),
+                np.array([local_aabb.max_point[0], local_aabb.min_point[1], local_aabb.max_point[2]]),
+                np.array([local_aabb.min_point[0], local_aabb.max_point[1], local_aabb.max_point[2]]),
+                np.array([local_aabb.max_point[0], local_aabb.max_point[1], local_aabb.max_point[2]]),
+            ]
+            
+            # Expand the body's AABB to include all transformed corners
+            for corner in corners:
+                # Apply offset, then transform to world space using the body's transform
+                world_corner = body.transform_point(corner + offset)
+                body_aabb.expand(world_corner)
         
         # Add margin for stability
-        aabb.min_point -= self.margin
-        aabb.max_point += self.margin
+        body_aabb.min_point -= self.margin
+        body_aabb.max_point += self.margin
         
-        return aabb
+        return body_aabb
     
     def _find_best_sibling(self, node):
         """Find the best sibling for a new node using volume heuristic"""

@@ -300,7 +300,75 @@ box_above_body.add_shape(box_above_shape)
 
 test_collision(ground_body.shapes[0], box_above_body.shapes[0], ground_body, box_above_body, "Plane", "Box (Above)", expected_collision=False)
 
-# Summary
+# Test 18: Box falling onto Plane - Simple case
+print("\n\n=== Test 18: Box falling onto Plane ===")
+# Box just above the plane
+falling_box_body = Body(position=(0, 1.1, 0))  # Box bottom at y=0.1
+falling_box = Box(half_extents=[1, 1, 1])
+falling_box_body.add_shape(falling_box)
+
+test_collision(ground_body.shapes[0], falling_box_body.shapes[0], ground_body, falling_box_body, "Plane", "Falling Box", expected_collision=True)
+
+# Test 19: Sphere vs Plane
+print("\n\n=== Test 19: Sphere vs Plane ===")
+sphere_on_plane_body = Body(position=(0, 0.8, 0))  # Sphere bottom at y=-0.2
+sphere_on_plane = Sphere(radius=1.0)
+sphere_on_plane_body.add_shape(sphere_on_plane)
+
+test_collision(ground_body.shapes[0], sphere_on_plane_body.shapes[0], ground_body, sphere_on_plane_body, "Plane", "Sphere", expected_collision=True)
+
+# Test 20: Cylinder vs Plane
+print("\n\n=== Test 20: Cylinder vs Plane ===")
+cylinder_on_plane_body = Body(position=(0, 0.9, 0))  # Cylinder bottom at y=-0.1
+cylinder_on_plane = Cylinder(radius=0.5, height=2.0)
+cylinder_on_plane_body.add_shape(cylinder_on_plane)
+
+test_collision(ground_body.shapes[0], cylinder_on_plane_body.shapes[0], ground_body, cylinder_on_plane_body, "Plane", "Cylinder", expected_collision=True)
+
+# Test 21: Edge-aligned Box vs Plane
+print("\n\n=== Test 21: Edge-aligned Box vs Plane ===")
+# Rotate box 45 degrees so edge touches plane
+edge_box_body = Body(position=(0, 1.414, 0))  # Position so rotated edge touches plane
+edge_box_body.Q = rotation_matrix_from_axis_angle(np.array([0, 0, 1]), np.pi/4)
+edge_box = Box(half_extents=[1, 1, 1])
+edge_box_body.add_shape(edge_box)
+
+test_collision(ground_body.shapes[0], edge_box_body.shapes[0], ground_body, edge_box_body, "Plane", "Edge-aligned Box", expected_collision=True)
+
+# Test 22: Multiple shapes vs Plane
+print("\n\n=== Test 22: Multiple shapes vs Plane ===")
+# Test several shapes at different heights
+test_heights = [0.5, 1.0, 1.5, 2.0, 3.0]
+for i, height in enumerate(test_heights):
+    test_box_body = Body(position=(i*2, height, 0))
+    test_box = Box(half_extents=[0.5, 0.5, 0.5])
+    test_box_body.add_shape(test_box)
+    
+    expected = height < 0.5  # Should collide if center is below 0.5
+    test_collision(ground_body.shapes[0], test_box_body.shapes[0], ground_body, test_box_body, 
+                   "Plane", f"Box at y={height}", expected_collision=expected)
+
+# Test 23: Another Rotated Box vs Sphere
+print("\n\n=== Test 23: Another Rotated Box vs Sphere ===")
+from PysoroGym.utils import rotation_matrix_from_axis_angle
+
+# Create a box rotated on two axes
+rotated_box_body = Body(position=(0, 0, 0))
+rot_y = rotation_matrix_from_axis_angle(np.array([0, 1, 0]), np.pi/6) # 30 degrees around Y
+rot_z = rotation_matrix_from_axis_angle(np.array([0, 0, 1]), np.pi/6) # 30 degrees around Z
+rotated_box_body.Q = np.dot(rot_z, rot_y)
+rotated_box = Box(half_extents=[1, 1, 1])
+rotated_box_body.add_shape(rotated_box)
+
+# Create a sphere to collide with it
+colliding_sphere_body = Body(position=(1.5, 0.5, 0))
+colliding_sphere = Sphere(radius=1.0)
+colliding_sphere_body.add_shape(colliding_sphere)
+
+test_collision(rotated_box_body.shapes[0], colliding_sphere_body.shapes[0], rotated_box_body, colliding_sphere_body, "Complex Rotated Box", "Sphere", expected_collision=True)
+
+
+# Update summary
 print("\n\n=== Test Summary ===")
 print("All shape combinations have been tested:")
 print("- Sphere-Sphere ✓")
@@ -312,8 +380,11 @@ print("- Sphere-Cylinder ✓")
 print("- Polyhedron-Box ✓")
 print("- Polyhedron-Polyhedron ✓")
 print("- Rotated Box vs Rotated Box ✓")
-print("- Box vs Plane ✓")
-print("- Angled Box vs Plane ✓")
+print("- Box vs Plane (multiple cases) ✓")
+print("- Sphere vs Plane ✓")
+print("- Cylinder vs Plane ✓")
+print("- Edge-aligned Box vs Plane ✓")
+print("- Angled Plane tests ✓")
 print("- Polyhedron vs Plane ✓")
 print("- Non-colliding cases ✓")
 print("- Edge cases (touching) ✓")

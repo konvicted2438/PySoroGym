@@ -1,11 +1,12 @@
 import numpy as np
 import pygame
 from .visulisation import OpenGLRenderer
-from .math_utils import q_to_euler
+from .math_utils import q_to_euler, q_to_mat3  # Add q_to_mat3 here
 from .collision import gjk  # Only import gjk from collision
-from .collision_resolution import resolve_contact  # Import from collision_resolution
+from .collision_resolution import Contact, resolve_contact
 from .aabb import AABBTree
 from .Body import Body
+from .Shape import Plane  # Also need to import Plane for isinstance checks
 
 
 class World:
@@ -24,13 +25,16 @@ class World:
         self.renderer = renderer
         
         # Collision detection settings
-        self.collision_iterations = 3
+        self.collision_iterations = 10  # Increased for better stability
         self.collision_pairs = []
         self.contacts = []  # Store contacts for visualization
         
         # Broad phase AABB tree
         self.aabb_tree = AABBTree(margin=0.1)
         
+        # Store contacts between frames for warm starting
+        self.persistent_contacts = {}  # Key: (body_id_a, body_id_b, shape_idx_a, shape_idx_b)
+    
     # ––––– Body Management –––––
     def add(self, body):
         """Add a physics body to the world."""
@@ -45,14 +49,24 @@ class World:
             self.bodies.remove(body)
             # Remove from AABB tree
             self.aabb_tree.remove(body)
+            # Remove persistent contacts involving this body
+            keys_to_remove = []
+            for key in self.persistent_contacts:
+                if id(body) in key[:2]:
+                    keys_to_remove.append(key)
+            for key in keys_to_remove:
+                del self.persistent_contacts[key]
     
     # ––––– Physics Pipeline –––––
-    def step(self):
+    def step(self, dt=None):
         """Advance simulation by dt seconds"""
+        self.contacts.clear()  # Use clear() to ensure complete removal
         if self.paused:
             return
         
-        # Update timestep
+        # Use provided dt or default
+        if dt is None:
+            dt = self.dt
         
         # 1. Apply gravity and forces
         for body in self.bodies:
@@ -61,7 +75,7 @@ class World:
         
         # 2. Integrate velocities (forces → velocities)
         for body in self.bodies:
-            body.integrate_velocities(self.dt)
+            body.integrate_velocities(dt)
             
         # 3. Update AABB tree for moving bodies
         for body in self.bodies:
@@ -70,22 +84,36 @@ class World:
             
         # 4. Broad phase collision detection using AABB tree
         self.collision_pairs = self._broad_phase_collision_detection()
+        #print(f"Collision pairs found: {len(self.collision_pairs)}")
         
         # 5. Narrow phase collision detection
-        self.contacts = self._narrow_phase_collision_detection()
+        new_contacts = self._narrow_phase_collision_detection()
         
-        # 6. Collision response (multiple iterations for stability)
-        for _ in range(self.collision_iterations):
-            self._solve_collisions()
+        # 6. Update persistent contacts
+        self._update_persistent_contacts(new_contacts)
+        
+        # 7. Collision response (multiple iterations for stability)
+        # Following ReactPhysics3D approach with iterative solving
+        for iteration in range(self.collision_iterations):
+            for contact in self.contacts:
+                        # Wake up bodies if contacted
+                if contact.body_a and contact.body_a.is_sleeping:
+                    contact.body_a.wake_up()
+                if contact.body_b and contact.body_b.is_sleeping:
+                    contact.body_b.wake_up()
+                resolve_contact(contact, dt)
             
-        # 7. Integrate positions (velocities → positions)
+        # 8. NEW: Add tunneling prevention specifically for planes
+        self._prevent_plane_tunneling(dt)
+        
+        # 9. Integrate positions (velocities → positions)
         for body in self.bodies:
-            body.integrate_positions(self.dt)
+            body.integrate_positions(dt)
             
-        # 8. Update sleep states
+        # 10. Update sleep states
         self._update_sleeping_bodies()
         
-        self.time += self.dt
+        self.time += dt
     
     def _broad_phase_collision_detection(self):
         """Use AABB tree for efficient broad phase collision detection."""
@@ -114,30 +142,67 @@ class World:
                 continue
             
             # Check collision between all shape pairs
-            for shape_a in body_a.shapes:
-                for shape_b in body_b.shapes:
+            for shape_idx_a, shape_a in enumerate(body_a.shapes):
+                for shape_idx_b, shape_b in enumerate(body_b.shapes):
                     # Use the new GJK-based collision detection
                     contact = gjk(shape_a, shape_b)
                     if contact:
+                        # Store shape indices for persistent contact tracking
+                        contact.shape_idx_a = shape_idx_a
+                        contact.shape_idx_b = shape_idx_b
                         contacts.append(contact)
         
-        return contacts  # Fixed: return contacts instead of setting self.contacts
+        return contacts
     
-    def _solve_collisions(self):
-        """Apply impulses to resolve collisions."""
-        for contact in self.contacts:
-            # Debug print before resolving contact
-            print(f"\nBEFORE RESOLUTION:")
-            print(f"Body A ({type(contact.shape_a.shape).__name__}): pos={contact.body_a.pos}, vel={contact.body_a.vel}")
-            print(f"Body B ({type(contact.shape_b.shape).__name__}): pos={contact.body_b.pos}, vel={contact.body_b.vel}")
-            print(f"Normal: {contact.normal}, Depth: {contact.depth}")
+    def _update_persistent_contacts(self, new_contacts):
+        """Update persistent contacts for warm starting."""
+        # Clear current contacts
+        self.contacts = []
+        
+        # Group new contacts by body pair
+        for contact in new_contacts:
+            key = (
+                id(contact.body_a), 
+                id(contact.body_b),
+                getattr(contact, 'shape_idx_a', 0),
+                getattr(contact, 'shape_idx_b', 0)
+            )
             
-            resolve_contact(contact, self.dt)
+            # Check if this is a persistent contact
+            if key in self.persistent_contacts:
+                old_contact = self.persistent_contacts[key]
+                # Transfer accumulated impulses for warm starting
+                contact.penetration_impulse = old_contact.penetration_impulse
+                contact.penetration_split_impulse = old_contact.penetration_split_impulse
+                contact.is_resting_contact = True
+            else:
+                # New contact
+                contact.penetration_impulse = 0.0
+                contact.penetration_split_impulse = 0.0
+                contact.is_resting_contact = False
             
-            # Debug print after resolving contact
-            print(f"\nAFTER RESOLUTION:")
-            print(f"Body A ({type(contact.shape_a.shape).__name__}): pos={contact.body_a.pos}, vel={contact.body_a.vel}")
-            print(f"Body B ({type(contact.shape_b.shape).__name__}): pos={contact.body_b.pos}, vel={contact.body_b.vel}")
+            # Store for next frame
+            self.persistent_contacts[key] = contact
+            self.contacts.append(contact)
+        
+        # Remove old contacts that no longer exist
+        current_keys = set()
+        for contact in new_contacts:
+            key = (
+                id(contact.body_a), 
+                id(contact.body_b),
+                getattr(contact, 'shape_idx_a', 0),
+                getattr(contact, 'shape_idx_b', 0)
+            )
+            current_keys.add(key)
+        
+        keys_to_remove = []
+        for key in self.persistent_contacts:
+            if key not in current_keys:
+                keys_to_remove.append(key)
+        
+        for key in keys_to_remove:
+            del self.persistent_contacts[key]
     
     def _update_sleeping_bodies(self):
         """Check and update sleep state of bodies for performance."""
@@ -216,6 +281,11 @@ class World:
     
     def reset_simulation(self):
         """Reset all dynamic bodies."""
+        # Clear persistent contacts
+        self.persistent_contacts.clear()
+        self.contacts.clear()
+        
+        # Reset bodies to initial state (if stored)
         # To be implemented - could store initial states
         pass
     
@@ -251,3 +321,82 @@ class World:
             
             # Cap framerate
             clock.tick(60)
+    
+    def _prevent_plane_tunneling(self, dt):
+        """Prevent fast-moving objects from tunneling through planes."""
+        # Find all static plane bodies in the world
+        from .Shape import Plane
+        
+        # Loop through all bodies to find static planes
+        static_plane_bodies = []
+        for body in self.bodies:
+            if body.is_static:
+                # Check if any of the shapes are planes
+                for shape_collider in body.shapes:
+                    if isinstance(shape_collider.shape, Plane):
+                        static_plane_bodies.append(body)
+                        break
+        
+        # Loop through all found static planes
+        for plane_body in static_plane_bodies:
+            # Check all shapes in the plane body (typically just one)
+            for plane_collider in plane_body.shapes:
+                plane_shape = plane_collider.shape
+                if not isinstance(plane_shape, Plane):
+                    continue
+                
+                # Get plane parameters in world space
+                rotation_matrix = q_to_mat3(plane_body.q)
+                plane_normal = rotation_matrix @ plane_shape.normal
+                plane_normal = plane_normal / np.linalg.norm(plane_normal)
+                plane_point = plane_body.pos
+                
+                # Check all dynamic bodies that might tunnel through
+                for body in self.bodies:
+                    if body.is_static or body.is_sleeping:
+                        continue
+                    
+                    # Skip bodies that are already in contact (they're being handled)
+                    already_in_contact = False
+                    for contact in self.contacts:
+                        if (contact.body_a is body and contact.body_b is plane_body) or \
+                           (contact.body_b is body and contact.body_a is plane_body):
+                            already_in_contact = True
+                            break
+                    
+                    if already_in_contact:
+                        continue
+                    
+                    # For each shape in the body
+                    for shape_collider in body.shapes:
+                        # Calculate current and predicted positions
+                        current_pos = body.pos
+                        
+                        # Predict where the body will be after integration
+                        predicted_pos = current_pos + body.vel * dt
+                        
+                        # Check current and predicted side of the plane
+                        current_side = np.dot(current_pos - plane_point, plane_normal)
+                        predicted_side = np.dot(predicted_pos - plane_point, plane_normal)
+                        
+                        # If crossing from above to below the plane in one step
+                        if current_side >= 0 and predicted_side < 0:
+                            # Calculate where it would hit the plane
+                            t = current_side / (current_side - predicted_side)
+                            hit_point = current_pos + t * (predicted_pos - current_pos)
+                            
+                            # 1. Limit velocity to prevent tunneling
+                            # Calculate how much to scale back velocity
+                            scale_factor = 0.8 * t  # Keep 80% of allowed velocity
+                            
+                            # Apply the velocity reduction
+                            body.vel *= scale_factor
+                            
+                            # 2. Add a small upward correction to ensure it stays above
+                            safety_margin = 0.01  # Small buffer above the plane
+                            min_dist_from_plane = 0.02  # Minimum allowed distance
+                            
+                            # Calculate required position adjustment
+                            required_height = min_dist_from_plane - predicted_side
+                            if required_height > 0:
+                                body.pos += required_height * plane_normal

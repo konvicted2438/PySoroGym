@@ -55,21 +55,21 @@ def main():
     
     
     #Add a few spheres
-    for i in range(1):
-        sphere = Body(mass=1.0, position=(i*0.1, 2 + i*2.5, 0))
-        sphere_shape = Sphere(radius=0.5)
-        sphere.add_shape(sphere_shape)
-        world.add(sphere)
+    # for i in range(1):
+    #     sphere = Body(mass=1.0, position=(i*0.1, 2 + i*2.5, 0))
+    #     sphere_shape = Sphere(radius=0.5)
+    #     sphere.add_shape(sphere_shape)
+    #     world.add(sphere)
     
     # Add a cylinder
     # cylinder = Body(mass=2.0, position=(3, 7, 2))
     # cylinder_shape = Cylinder(radius=0.7, height=1.5)
     # cylinder.add_shape(cylinder_shape)
     # world.add(cylinder)
-    for i in range(1):
+    for i in range(3):
         
-        box = Body(mass=1.5, position=(0, 10+i*2.5, 0), angular_velocity=(1,1,1))
-        box_size = [1.0, 1.0, 1.0]
+        box = Body(mass=1, position=(0, 1+i*2.5, 0), angular_velocity=(1,1,1))
+        box_size = [0.5, 0.5, 0.5]
         box_shape = Box(box_size) # Pass the list directly
         box.add_shape(box_shape)
         world.add(box)
@@ -85,6 +85,19 @@ def main():
     # world.add(snowman)
     
     # Add event handler for spawning objects
+    
+    # Verify that all shapes have body references
+    for body in world.bodies:
+        for shape in body.shapes:
+            if shape.body is None or shape.body is not body:
+                print(f"ERROR: Shape {type(shape).__name__} has incorrect body reference")
+                # Fix it
+                shape.body = body
+                
+
+
+
+                
     world.run()
 
 if __name__ == "__main__":

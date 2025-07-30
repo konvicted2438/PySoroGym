@@ -89,13 +89,12 @@ class ShapeCollider:
         return transform
         
     def world_support(self, direction):
-        """Get support point in world space."""
-        if not self.body:
-            return self.shape.support(direction)
-            
+        """Find the support point in the given direction (world space)"""
         # Transform direction to local space
-        R = q_to_mat3(self.body.q)
-        p_local = self.shape.support(R.T @ direction)
+        local_dir = self.body.transform_direction_inverse(direction)
         
-        # Transform point back to world space
-        return R @ (p_local + self.offset) + self.body.pos
+        # Get support point in local space
+        local_support = self.shape.support(local_dir)
+        
+        # Transform to world space
+        return self.body.transform_point(local_support)

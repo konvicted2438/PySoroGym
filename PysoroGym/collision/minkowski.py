@@ -1,4 +1,5 @@
 import numpy as np
+from ..math_utils import q_to_mat3
 
 
 class Simplex:
@@ -44,50 +45,23 @@ class Simplex:
         return self.v1[index], self.v2[index]
 
 
-def support_function(shape_a, shape_b, direction):
-    """Get support point of Minkowski difference A-B in given direction.
-    
-    Parameters
-    ----------
-    shape_a : Shape
-        First shape
-    shape_b : Shape
-        Second shape
-    direction : array, shape (3,)
-        Search direction
-        
-    Returns
-    -------
-    v : array, shape (3,)
-        Support point in Minkowski difference
-    v1 : array, shape (3,)
-        Support point on shape A
-    v2 : array, shape (3,)
-        Support point on shape B
+def support_function(shape_a, shape_b, d_world):
     """
-    # Get support points from each shape
-    if hasattr(shape_a, 'support'):
-        v1 = shape_a.support(direction)
-        # Apply body transformation if available
-        if hasattr(shape_a, 'body') and shape_a.body is not None:
-            v1 = shape_a.body.pos + v1
-    elif hasattr(shape_a, 'world_support'):
-        v1 = shape_a.world_support(direction)
-    else:
-        raise AttributeError("Shape A has no support or world_support method")
-    
-    # IMPORTANT: Use -direction for shape B
-    if hasattr(shape_b, 'support'):
-        v2 = shape_b.support(-direction)
-        # Apply body transformation if available
-        if hasattr(shape_b, 'body') and shape_b.body is not None:
-            v2 = shape_b.body.pos + v2
-    elif hasattr(shape_b, 'world_support'):
-        v2 = shape_b.world_support(-direction)
-    else:
-        raise AttributeError("Shape B has no support or world_support method")
-    
-    # Minkowski difference
-    v = v1 - v2
-    
-    return v, v1, v2
+    World-space support of the Minkowski difference + the two original points.
+    """
+    # Body rotations (local → world)
+    Ra = q_to_mat3(shape_a.body.q)
+    Rb = q_to_mat3(shape_b.body.q)
+
+    # --- A -------------------------------------------------------------
+    d_a_local = Ra.T @ d_world                 # world → local
+    p1_local  = shape_a.shape.support(d_a_local)
+    p1_world  = Ra @ p1_local + shape_a.body.pos
+
+    # --- B -------------------------------------------------------------
+    d_b_local = Rb.T @ -d_world
+    p2_local  = shape_b.shape.support(d_b_local)
+    p2_world  = Rb @ p2_local + shape_b.body.pos
+
+    v = p1_world - p2_world                    # Minkowski point
+    return v, p1_world, p2_world

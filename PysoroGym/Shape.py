@@ -21,6 +21,14 @@ class ConvexShape:
         """Return the mesh data for rendering."""
         return self.vertices, self.indices, self.normals
 
+    def get_local_aabb(self):
+        """Return the AABB of the shape in its local coordinates."""
+        # Default implementation using vertices, can be overridden for speed
+        from .aabb import AABB
+        if self.vertices.size == 0:
+            return AABB(np.zeros(3), np.zeros(3))
+        return AABB(np.min(self.vertices, axis=0), np.max(self.vertices, axis=0))
+
 
 class Sphere(ConvexShape):
     def __init__(self, radius: float, resolution: int = 16):
@@ -80,6 +88,12 @@ class Sphere(ConvexShape):
     def inertia(self, m):
         I = 0.4 * m * self.r**2  # 2/5 m r²
         return np.array([I, I, I])
+
+    def get_local_aabb(self):
+        from .aabb import AABB
+        min_p = np.array([-self.r, -self.r, -self.r])
+        max_p = np.array([self.r, self.r, self.r])
+        return AABB(min_p, max_p)
 
 
 class Box(ConvexShape):
@@ -151,6 +165,10 @@ class Box(ConvexShape):
             x*x + y*y
         ])
 
+    def get_local_aabb(self):
+        from .aabb import AABB
+        return AABB(-self.h, self.h)
+
 
 class Cylinder(ConvexShape):
     def __init__(self, radius, height, resolution=16):
@@ -217,33 +235,15 @@ class Cylinder(ConvexShape):
         self.normals = np.array(normals, dtype=float)
 
     def support(self, d):
-        """
-        Returns the point on the cylinder furthest in a given direction.
-        This is found by comparing the support of the cylindrical wall and the support of the top/bottom caps.
-        """
-        # Support point on the cylindrical wall (ignoring caps)
-        d_xz = np.array([d[0], 0, d[2]])
-        n_xz = np.linalg.norm(d_xz)
-        
-        if n_xz > 1e-9:
-            # Point on the side of the cylinder
-            p_side = (d_xz / n_xz) * self.r
-            p_side[1] = self.half_height if d[1] > 0 else -self.half_height
-        else:
-            # Direction is purely along Y, support is on the cap center
-            p_side = np.array([0, self.half_height if d[1] > 0 else -self.half_height, 0])
-
-        # Support point on the top/bottom caps (a point on the rim)
-        p_caps = np.array([0.0, self.half_height if d[1] > 0 else -self.half_height, 0.0])
-        if n_xz > 1e-9:
-            p_caps[0] = (d[0] / n_xz) * self.r
-            p_caps[2] = (d[2] / n_xz) * self.r
-
-        # Return the point that is further in direction d
-        if np.dot(p_side, d) > np.dot(p_caps, d):
-            return p_side
-        else:
-            return p_caps
+        dx, dy, dz = d
+        # radial part
+        v = np.array([dx, 0.0, dz], float)
+        nr = np.linalg.norm(v)
+        if nr > 1e-10:
+            v = v / nr * self.r
+        # choose top/bottom cap
+        y =  0.5*self.h if dy > 0 else -0.5*self.h
+        return np.array([v[0], y, v[2]])
 
     def inertia(self, m):
         # Cylinder formulas
@@ -300,9 +300,13 @@ class Plane(ConvexShape):
         self.normals = np.array(normals, dtype=float)
 
     def support(self, d):
-        # Planes are special since they're infinite, so we'll need
-        # to handle this specially in the collision detection
-        # But for now, just return the center of the plane
+        d = np.asarray(d, float)
+        n = self.normal / np.linalg.norm(self.normal)
+        # if search direction points toward the half-space, the extreme
+        # point is the plane origin; otherwise it is infinitely far away.
+        if d @ n <= 0:
+            return np.zeros(3)
+        # Returning the origin again keeps the MD bounded.
         return np.zeros(3)
 
     def inertia(self, m):

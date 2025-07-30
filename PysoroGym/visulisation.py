@@ -348,7 +348,17 @@ class OpenGLRenderer:
         gluCylinder(self.quadric, radius, radius, length, 16, 1)
         
         glPopMatrix()
+      # Add this method to your renderer class
+
+    def draw_contact(self, point, normal, length=0.5):
+        """Draw a contact point and normal for debugging."""
+        # Draw contact point as a small red sphere
+        self.draw_sphere(point, radius=0.02, color=(1, 0, 0))
         
+        # Draw normal vector as a green line
+        end_point = point + normal * length
+        self.draw_line(point, end_point, color=(0, 1, 0), width=2)
+
     def draw_grid(self, size=10, divisions=20):
         """Draw reference grid"""
         glDisable(GL_LIGHTING)
@@ -386,6 +396,34 @@ class OpenGLRenderer:
             
         pygame.quit()
 
+
+# Add these methods to your OpenGLRenderer class before the draw_contact method:
+
+    def draw_sphere(self, position, radius=0.5, color=(1, 0, 0)):
+        """Draw a simple sphere at the specified position"""
+        glPushMatrix()
+        glTranslatef(position[0], position[1], position[2])
+        
+        # Set the color
+        glColor3f(*color)
+        
+        # Create sphere using quadric
+        gluSphere(self.quadric, radius, 16, 16)
+        
+        glPopMatrix()
+
+    def draw_line(self, start_point, end_point, color=(1, 1, 1), width=1.0):
+        """Draw a simple line between two points"""
+        glDisable(GL_LIGHTING)
+        glColor3f(*color)
+        glLineWidth(width)
+        
+        glBegin(GL_LINES)
+        glVertex3f(*start_point)
+        glVertex3f(*end_point)
+        glEnd()
+        
+        glEnable(GL_LIGHTING)
 
 # Validation function
 def validate_mesh_rendering():
