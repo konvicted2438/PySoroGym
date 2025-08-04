@@ -583,7 +583,7 @@ def resolve_generic_contact(contact, dt):
     # floating point errors when objects are separating, so clamp it.
     j = max(0.0, j)
 
-    impulse = j * contact.normal
+    impulse = j * contact.normal*0.3
 
     # 4. -------------------------------- Apply impulse
     if body_a.body_type == Body.DYNAMIC:
