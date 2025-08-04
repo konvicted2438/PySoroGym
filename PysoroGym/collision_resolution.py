@@ -562,14 +562,27 @@ def resolve_generic_contact(contact, dt):
     rel_vel   = v_b - v_a
     normal_vel = np.dot(rel_vel, contact.normal)
 
+    # If velocities are separating, no impulse is needed.
+    if normal_vel > 0:
+        return
+
     # 2. -------------------------------- Bias terms (restitution + Baumgarte)
-    restitution        = 0.2
-    restitution_bias   = 0.0 if normal_vel > -1.0 else -restitution * normal_vel
-    positional_bias    = (BETA / dt) * max(0.0, contact.depth - SLOP)
-    total_bias         = restitution_bias + positional_bias
+    restitution = 0.2
+    # Prevent bounce when objects are slow or resting
+    if abs(normal_vel) < 1.0:
+        restitution = 0.0
+        
+    positional_bias = (BETA / dt) * max(0.0, contact.depth - SLOP)
 
     # 3. -------------------------------- Impulse
-    j = -(normal_vel + total_bias) / inv_effective_mass
+    # --- FIX: Use the correct impulse formula ---
+    j_numerator = -(1.0 + restitution) * normal_vel + positional_bias
+    j = j_numerator / inv_effective_mass
+    
+    # The impulse must be repulsive. A small negative j can happen due to
+    # floating point errors when objects are separating, so clamp it.
+    j = max(0.0, j)
+
     impulse = j * contact.normal
 
     # 4. -------------------------------- Apply impulse
@@ -593,7 +606,6 @@ def resolve_generic_contact(contact, dt):
         print(f"v_a / v_b                 : {v_a} / {v_b}")
         print(f"Relative velocity         : {rel_vel}")
         print(f"Normal relative velocity  : {normal_vel}")
-        print(f"Restitution bias          : {restitution_bias}")
         print(f"Positional bias           : {positional_bias}")
         print(f"Impulse magnitude (j)     : {j}")
         print(f"Post-impulse vel/ang A    : {body_a.vel} / {body_a.ang_vel}")

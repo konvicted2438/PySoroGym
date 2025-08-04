@@ -68,7 +68,7 @@ def main():
     # world.add(cylinder)
     for i in range(3):
         
-        box = Body(mass=1, position=(0, 1+i*2.5, 0), angular_velocity=(1,1,1))
+        box = Body(mass=1, position=(0, 1+i*2.5, 0))
         box_size = [0.5, 0.5, 0.5]
         box_shape = Box(box_size) # Pass the list directly
         box.add_shape(box_shape)
