@@ -3,7 +3,8 @@ import pygame
 from .visulisation import OpenGLRenderer
 from .math_utils import q_to_euler, q_to_mat3  # Add q_to_mat3 here
 from .collision import gjk  # Only import gjk from collision
-from .collision_resolution import Contact, resolve_contact
+# --- CHANGE: Import the new solver components ---
+from .collision_resolution import Contact, resolve_contact, ContactSolver, ContactManifold
 from .aabb import AABBTree
 from .Body import Body
 from .Shape import Plane  # Also need to import Plane for isinstance checks
@@ -34,6 +35,9 @@ class World:
         
         # Store contacts between frames for warm starting
         self.persistent_contacts = {}  # Key: (body_id_a, body_id_b, shape_idx_a, shape_idx_b)
+        
+        # --- NEW: Instantiate the contact solver ---
+        self.contact_solver = ContactSolver(use_split_impulse=True)
     
     # ––––– Body Management –––––
     def add(self, body):
@@ -93,15 +97,19 @@ class World:
         self._update_persistent_contacts(new_contacts)
         
         # 7. Collision response (multiple iterations for stability)
-        # Following ReactPhysics3D approach with iterative solving
-        for iteration in range(self.collision_iterations):
-            for contact in self.contacts:
-                        # Wake up bodies if contacted
-                if contact.body_a and contact.body_a.is_sleeping:
-                    contact.body_a.wake_up()
-                if contact.body_b and contact.body_b.is_sleeping:
-                    contact.body_b.wake_up()
-                resolve_contact(contact, dt)
+        # --- CHANGE: Use the new ContactSolver ---
+        # Group contacts into manifolds
+        manifolds = self._group_contacts_into_manifolds()
+        
+        # Wake up bodies involved in any contact
+        for manifold in manifolds:
+            if manifold.body_a and manifold.body_a.is_sleeping:
+                manifold.body_a.wake_up()
+            if manifold.body_b and manifold.body_b.is_sleeping:
+                manifold.body_b.wake_up()
+        
+        # Solve all contact constraints iteratively
+        self.contact_solver.solve(manifolds, dt, self.collision_iterations)
             
         # 8. NEW: Add tunneling prevention specifically for planes
         self._prevent_plane_tunneling(dt)
@@ -204,6 +212,25 @@ class World:
         for key in keys_to_remove:
             del self.persistent_contacts[key]
     
+    def _group_contacts_into_manifolds(self):
+        """Group individual contacts into manifolds for the solver."""
+        manifolds = {}  # Use a dict to group by body pair
+        
+        for contact in self.contacts:
+            # Create a unique, order-independent key for the body pair
+            key = tuple(sorted((id(contact.body_a), id(contact.body_b))))
+            
+            if key not in manifolds:
+                # Create a new manifold. The ContactManifold will handle body references.
+                manifolds[key] = ContactManifold(contact.collider_a, contact.collider_b)
+            
+            # Add the contact point to the existing manifold
+            manifolds[key].add_contact(
+                contact.normal, contact.depth, contact.contact_a, contact.contact_b
+            )
+            
+        return list(manifolds.values())
+
     def _update_sleeping_bodies(self):
         """Check and update sleep state of bodies for performance."""
         for body in self.bodies:

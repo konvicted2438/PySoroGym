@@ -2,611 +2,361 @@ import numpy as np
 from .Body import Body
 from .Shape import Plane
 
-# Constants from ReactPhysics3D
-BETA = 0.2  # Baumgarte stabilization
-BETA_SPLIT_IMPULSE = 0.2
-SLOP = 0.01  # Penetration slop
-RESTITUTION_VELOCITY_THRESHOLD = 1.0  # m/s
+# ------------------------------------------------------------------
+# Constants (tune as needed)
+BETA = 0.2                      # Baumgarte position stabilization (velocity bias factor)
+SLOP = 0.01                     # Penetration slop
+RESTITUTION_VELOCITY_THRESHOLD = 1.0
+FRICTION_EPSILON = 1e-8
+NORMAL_EPSILON = 1e-8
+MAX_CONTACTS_PER_MANIFOLD = 4
+# ------------------------------------------------------------------
 
-class Contact:
-    """
-    Stores all information about a collision between two colliders.
-    This class enforces that it is initialized with ShapeCollider objects.
-    """
-    def __init__(self, collider_a, collider_b, normal, depth, contact_a, contact_b):
-        # --- Enforce consistent initialization ---
-        # The arguments collider_a and collider_b MUST be ShapeCollider instances.
-        self.collider_a = collider_a
-        self.collider_b = collider_b
-        
-        # --- Derive all other references from the colliders ---
-        # The raw geometry (e.g., Sphere, Box)
-        self.shape_a = collider_a.shape
-        self.shape_b = collider_b.shape
-        
-        # The parent physics body
-        self.body_a = collider_a.body
-        self.body_b = collider_b.body
-        
-        # --- Contact data ---
-        self.normal = np.array(normal, dtype=float)
-        self.depth = depth
-        
-        # World space contact points
-        self.contact_a = np.array(contact_a, dtype=float)
-        self.contact_b = np.array(contact_b, dtype=float)
-        
-        # --- Solver data ---
-        self.shape_idx_a = -1
-        self.shape_idx_b = -1
-        self.restitution = 0.0
-        self.friction = 0.0
-        
-        # --- Sanity Check ---
-        # Warn if, for some reason, a body reference is still missing.
-        if self.body_a is None or self.body_b is None:
-            print(f"[Contact] CRITICAL: Could not resolve body reference from colliders.")
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+# -----------------------------------------------------------
+# Basic contact data structures
+# -----------------------------------------------------------
+class ContactPoint:
+    def __init__(self, normal, depth, local_point_a, local_point_b):
+        self.normal = np.asarray(normal, dtype=float)
+        self.depth = float(depth)
+        self.local_point_a = np.asarray(local_point_a, dtype=float)
+        self.local_point_b = np.asarray(local_point_b, dtype=float)
+        # Cached world points (filled when building constraints)
+        self.world_point_a = None
+        self.world_point_b = None
+        # Warm starting
+        self.normal_impulse = 0.0
+        self.tangent_impulse1 = 0.0
+        self.tangent_impulse2 = 0.0
+        self.twist_impulse = 0.0
 
 class ContactManifold:
-    """Groups multiple contact points between two shapes."""
-    def __init__(self, shape_a, shape_b):
-        self.shape_a = shape_a
-        self.shape_b = shape_b
-        self.body_a = shape_a.body
-        self.body_b = shape_b.body
-        self.contacts = []
-        
-        # Friction vectors and impulses (stored for warm starting)
-        self.friction_vector1 = np.zeros(3)
-        self.friction_vector2 = np.zeros(3)
+    def __init__(self, collider_a, collider_b):
+        self.collider_a = collider_a
+        self.collider_b = collider_b
+        self.body_a = collider_a.body if collider_a is not None else None
+        self.body_b = collider_b.body if collider_b is not None else None
+        self.points: list[ContactPoint] = []
+        # Aggregate cached impulses (optional)
         self.friction_impulse1 = 0.0
         self.friction_impulse2 = 0.0
         self.friction_twist_impulse = 0.0
-        
-    def add_contact(self, normal, depth, contact_a, contact_b):
-        contact = ContactPoint(normal, depth, contact_a, contact_b)
-        self.contacts.append(contact)
-        return contact
 
-class ContactPoint:
-    """Individual contact point data."""
-    def __init__(self, normal, depth, contact_a, contact_b):
-        self.normal = normal
-        self.depth = depth
-        self.contact_a = contact_a
-        self.contact_b = contact_b
-        
-        # Impulses (stored for warm starting)
+    def add_contact(self, normal, depth, world_point_a, world_point_b):
+        if depth < 0:
+            return
+        # Convert to local (simple if body has transform helpers; else store world)
+        lp_a = world_point_a - self.body_a.position if self.body_a else world_point_a
+        lp_b = world_point_b - self.body_b.position if self.body_b else world_point_b
+        if len(self.points) < MAX_CONTACTS_PER_MANIFOLD:
+            self.points.append(ContactPoint(normal, depth, lp_a, lp_b))
+
+# Legacy single contact wrapper (kept for backward compatibility)
+class Contact:
+    def __init__(self, collider_a, collider_b, normal, depth,
+                 point_a=None, point_b=None, contact_a=None, contact_b=None):
+        # Accept old or new parameter names
+        if point_a is None and contact_a is not None:
+            point_a = contact_a
+        if point_b is None and contact_b is not None:
+            point_b = contact_b
+
+        self.collider_a = collider_a
+        self.collider_b = collider_b
+        self.body_a = collider_a.body if collider_a else None
+        self.body_b = collider_b.body if collider_b else None
+        self.normal = np.asarray(normal, dtype=float)
+        self.depth = float(depth)
+        self.contact_a = np.asarray(point_a, dtype=float) if point_a is not None else np.zeros(3)
+        self.contact_b = np.asarray(point_b, dtype=float) if point_b is not None else np.zeros(3)
+
+        # Warm start / solver fields (added lazily elsewhere but define here for clarity)
         self.penetration_impulse = 0.0
         self.penetration_split_impulse = 0.0
         self.is_resting_contact = False
 
-class ContactSolver:
-    """Iterative contact solver following ReactPhysics3D approach."""
-    
-    def __init__(self, use_split_impulse=True):
-        self.use_split_impulse = use_split_impulse
-        self.contact_constraints = []
-        self.contact_points = []
-        
-    def solve(self, manifolds, dt, num_iterations=10):
-        """Main solving routine."""
-        if not manifolds:
-            return
-            
-        # Initialize constraints
-        self.init_constraints(manifolds, dt)
-        
-        # Warm start using previous frame impulses
-        self.warm_start()
-        
-        # Solve velocity constraints iteratively
-        for _ in range(num_iterations):
-            self.solve_velocity_constraints()
-            
-        # Store impulses for next frame
-        self.store_impulses(manifolds)
-        
-    def init_constraints(self, manifolds, dt):
-        """Initialize constraint data for all contact manifolds."""
-        self.contact_constraints = []
-        self.contact_points = []
-        
-        for manifold in manifolds:
-            if not manifold.contacts:
-                continue
-                
-            # Create constraint for this manifold
-            constraint = ContactManifoldConstraint(manifold, dt)
-            self.contact_constraints.append(constraint)
-            
-            # Initialize contact points
-            for contact in manifold.contacts:
-                point = ContactPointConstraint(contact, constraint, dt)
-                self.contact_points.append(point)
-                constraint.contact_points.append(point)  # Link to constraint
-                
-    def warm_start(self):
-        """Apply impulses from previous frame."""
-        for constraint in self.contact_constraints:
-            constraint.warm_start()
-            
-    def solve_velocity_constraints(self):
-        """One iteration of velocity constraint solving."""
-        # Solve normal constraints (penetration)
-        for point in self.contact_points:
-            point.solve_penetration()
-            
-        # Solve friction constraints at manifold level
-        for constraint in self.contact_constraints:
-            constraint.solve_friction()
+# -----------------------------------------------------------
+# Constraint helpers
+# -----------------------------------------------------------
+class ContactPointConstraint:
+    def __init__(self, manifold_constraint, cp: ContactPoint):
+        self.manifold = manifold_constraint
+        self.cp = cp
 
-    def store_impulses(self, manifolds):
-        """Store impulses back to manifolds for warm starting next frame."""
-        # Impulses are already stored directly in the manifold objects
-        pass
+        self.body_a = manifold_constraint.body_a
+        self.body_b = manifold_constraint.body_b
 
-class ContactManifoldConstraint:
-    """Constraint data for a contact manifold."""
-    
-    def __init__(self, manifold, dt):
-        self.manifold = manifold
-        self.dt = dt
-        self.body_a = manifold.body_a
-        self.body_b = manifold.body_b
-        
-        # Get masses and inertias
-        self.inv_mass_a = self.body_a.inv_mass if self.body_a.body_type == Body.DYNAMIC else 0.0
-        self.inv_mass_b = self.body_b.inv_mass if self.body_b.body_type == Body.DYNAMIC else 0.0
-        
-        if self.body_a.body_type == Body.DYNAMIC:
-            self.inv_inertia_a = self.body_a.inv_inertia_world()
+        # World space contact points
+        if self.body_a:
+            cp.world_point_a = self.body_a.position + cp.local_point_a
         else:
-            self.inv_inertia_a = np.zeros((3, 3))
-            
-        if self.body_b.body_type == Body.DYNAMIC:
-            self.inv_inertia_b = self.body_b.inv_inertia_world()
+            cp.world_point_a = cp.local_point_a
+        if self.body_b:
+            cp.world_point_b = self.body_b.position + cp.local_point_b
         else:
-            self.inv_inertia_b = np.zeros((3, 3))
-            
-        # Compute average normal and friction point
-        self.normal = np.zeros(3)
-        self.friction_point_a = np.zeros(3)
-        self.friction_point_b = np.zeros(3)
-        
-        for contact in manifold.contacts:
-            self.normal += contact.normal
-            self.friction_point_a += contact.contact_a
-            self.friction_point_b += contact.contact_b
-            
-        num_contacts = len(manifold.contacts)
-        self.normal /= num_contacts
-        self.normal /= np.linalg.norm(self.normal)
-        self.friction_point_a /= num_contacts
-        self.friction_point_b /= num_contacts
-        
-        # Friction vectors and mass
-        self.r1_friction = self.friction_point_a - self.body_a.pos
-        self.r2_friction = self.friction_point_b - self.body_b.pos
-        self.compute_friction_vectors()
-        self.compute_friction_mass()
-        
-        # Material properties
-        mat_a = getattr(manifold.shape_a, 'material', None)
-        mat_b = getattr(manifold.shape_b, 'material', None)
-        friction_a = getattr(mat_a, 'friction', 0.5) if mat_a else 0.5
-        friction_b = getattr(mat_b, 'friction', 0.5) if mat_b else 0.5
-        self.friction_coeff = np.sqrt(friction_a * friction_b)
-        
-    def compute_friction_vectors(self):
-        """Compute orthogonal friction vectors."""
-        # Get relative velocity at friction point
-        v_a = self.body_a.vel + np.cross(self.body_a.ang_vel, self.r1_friction)
-        v_b = self.body_b.vel + np.cross(self.body_b.ang_vel, self.r2_friction)
-        v_rel = v_b - v_a
-        
-        # Project to tangent plane
-        v_tangent = v_rel - np.dot(v_rel, self.normal) * self.normal
-        
-        if np.linalg.norm(v_tangent) > 1e-6:
-            self.friction_vector1 = v_tangent / np.linalg.norm(v_tangent)
-        else:
-            # Get any orthogonal vector
-            if abs(self.normal[0]) < 0.9:
-                self.friction_vector1 = np.cross(self.normal, np.array([1, 0, 0]))
-            else:
-                self.friction_vector1 = np.cross(self.normal, np.array([0, 1, 0]))
-            self.friction_vector1 /= np.linalg.norm(self.friction_vector1)
-            
-        self.friction_vector2 = np.cross(self.normal, self.friction_vector1)
-        
-    def compute_friction_mass(self):
-        """Compute inverse mass matrices for friction constraints."""
-        # First friction direction
-        r1_cross_t1 = np.cross(self.r1_friction, self.friction_vector1)
-        r2_cross_t1 = np.cross(self.r2_friction, self.friction_vector1)
-        
-        k1 = self.inv_mass_a + self.inv_mass_b
-        k1 += np.dot(self.friction_vector1, np.cross(self.inv_inertia_a @ r1_cross_t1, self.r1_friction))
-        k1 += np.dot(self.friction_vector1, np.cross(self.inv_inertia_b @ r2_cross_t1, self.r2_friction))
-        
-        self.inv_friction_mass1 = 1.0 / k1 if k1 > 1e-10 else 0.0
-        
-        # Second friction direction
-        r1_cross_t2 = np.cross(self.r1_friction, self.friction_vector2)
-        r2_cross_t2 = np.cross(self.r2_friction, self.friction_vector2)
-        
-        k2 = self.inv_mass_a + self.inv_mass_b
-        k2 += np.dot(self.friction_vector2, np.cross(self.inv_inertia_a @ r1_cross_t2, self.r1_friction))
-        k2 += np.dot(self.friction_vector2, np.cross(self.inv_inertia_b @ r2_cross_t2, self.r2_friction))
-        
-        self.inv_friction_mass2 = 1.0 / k2 if k2 > 1e-10 else 0.0
-        
-        # Twist friction
-        k_twist = np.dot(self.normal, self.inv_inertia_a @ self.normal)
-        k_twist += np.dot(self.normal, self.inv_inertia_b @ self.normal)
-        
-        self.inv_twist_mass = 1.0 / k_twist if k_twist > 1e-10 else 0.0
-        
-    def compute_restitution_bias(self):
-        """Compute restitution velocity bias."""
-        mat_a = getattr(self.constraint.manifold.shape_a, 'material', None)
-        mat_b = getattr(self.constraint.manifold.shape_b, 'material', None)
-        
-        restitution_a = getattr(mat_a, 'restitution', 0.0) if mat_a else 0.0
-        restitution_b = getattr(mat_b, 'restitution', 0.0) if mat_b else 0.0
-        restitution = max(restitution_a, restitution_b)
-        
-        if restitution > 0.0:
-            v_rel = self.compute_relative_velocity()
-            v_n = np.dot(v_rel, self.contact.normal)
-            
-            if v_n < -RESTITUTION_VELOCITY_THRESHOLD:
-                self.restitution_bias = -restitution * v_n
-            else:
-                self.restitution_bias = 0.0
-        else:
-            self.restitution_bias = 0.0
+            cp.world_point_b = cp.local_point_b
 
-    def compute_relative_velocity(self):
-        """Compute relative velocity at contact point."""
-        v_a = self.constraint.body_a.vel + np.cross(self.constraint.body_a.ang_vel, self.r1)
-        v_b = self.constraint.body_b.vel + np.cross(self.constraint.body_b.ang_vel, self.r2)
+        self.world_point = 0.5 * (cp.world_point_a + cp.world_point_b)
+
+        self.normal = manifold_constraint.normal
+        self.t1 = manifold_constraint.t1
+        self.t2 = manifold_constraint.t2
+
+        # Vectors from centers to contact
+        self.r_a = self.world_point - self.body_a.position if self.body_a else np.zeros(3)
+        self.r_b = self.world_point - self.body_b.position if self.body_b else np.zeros(3)
+
+        # Effective mass denominators (normal and tangents)
+        self.eff_mass_n = self._compute_effective_mass(self.normal)
+        self.eff_mass_t1 = self._compute_effective_mass(self.t1)
+        self.eff_mass_t2 = self._compute_effective_mass(self.t2)
+
+        # Velocity bias for restitution / Baumgarte
+        self.velocity_bias = 0.0
+        self._compute_velocity_bias()
+
+    def _compute_effective_mass(self, dir_vec):
+        denom = 0.0
+        if self.body_a and self.body_a.body_type == Body.DYNAMIC:
+            r_cross = np.cross(self.r_a, dir_vec)
+            denom += self.body_a.inv_mass + r_cross @ (self.body_a.inv_inertia_world() @ r_cross)
+        if self.body_b and self.body_b.body_type == Body.DYNAMIC:
+            r_cross = np.cross(self.r_b, dir_vec)
+            denom += self.body_b.inv_mass + r_cross @ (self.body_b.inv_inertia_world() @ r_cross)
+        if denom < 1e-10:
+            return 0.0
+        return 1.0 / denom
+
+    def _relative_velocity(self):
+        v_a = np.zeros(3)
+        v_b = np.zeros(3)
+        if self.body_a:
+            v_a = self.body_a.vel + np.cross(self.body_a.ang_vel, self.r_a)
+        if self.body_b:
+            v_b = self.body_b.vel + np.cross(self.body_b.ang_vel, self.r_b)
         return v_b - v_a
 
-    def apply_impulse(self, impulse):
-        """Apply impulse to both bodies."""
-        if self.constraint.body_a.body_type == Body.DYNAMIC:
-            self.constraint.body_a.vel -= self.constraint.inv_mass_a * impulse
-            self.constraint.body_a.ang_vel -= self.constraint.inv_inertia_a @ np.cross(self.r1, impulse)
-    
-        if self.constraint.body_b.body_type == Body.DYNAMIC:
-            self.constraint.body_b.vel += self.constraint.inv_mass_b * impulse
-            self.constraint.body_b.ang_vel += self.constraint.inv_inertia_b @ np.cross(self.r2, impulse)
+    def _compute_velocity_bias(self):
+        # Baumgarte + restitution
+        depth = self.cp.depth
+        if depth > SLOP:
+            baumgarte = BETA * (depth - SLOP)
+        else:
+            baumgarte = 0.0
+
+        rel_v = self._relative_velocity()
+        v_n = rel_v @ self.normal
+
+        restitution = self.manifold.restitution
+        rest_bias = 0.0
+        if restitution > 0.0 and v_n < -RESTITUTION_VELOCITY_THRESHOLD:
+            rest_bias = -restitution * v_n
+
+        self.velocity_bias = baumgarte + rest_bias
 
     def warm_start(self):
-        """Apply friction impulses from previous frame."""
-        # Apply friction impulse 1
-        if abs(self.manifold.friction_impulse1) > 1e-10:
-            self.apply_friction_impulse(self.manifold.friction_impulse1 * self.friction_vector1)
-    
-        # Apply friction impulse 2
-        if abs(self.manifold.friction_impulse2) > 1e-10:
-            self.apply_friction_impulse(self.manifold.friction_impulse2 * self.friction_vector2)
-    
-        # Apply twist friction
-        if abs(self.manifold.friction_twist_impulse) > 1e-10:
-            self.apply_twist_impulse(self.manifold.friction_twist_impulse)
+        # Apply stored impulses
+        if self.cp.normal_impulse != 0.0:
+            self._apply_impulse(self.normal * self.cp.normal_impulse)
+        if self.cp.tangent_impulse1 != 0.0:
+            self._apply_impulse(self.t1 * self.cp.tangent_impulse1)
+        if self.cp.tangent_impulse2 != 0.0:
+            self._apply_impulse(self.t2 * self.cp.tangent_impulse2)
 
-    def apply_twist_impulse(self, impulse):
-        """Apply twist friction impulse."""
-        if self.body_a.body_type == Body.DYNAMIC:
-            self.body_a.ang_vel -= impulse * self.inv_inertia_a @ self.normal
-    
-        if self.body_b.body_type == Body.DYNAMIC:
-            self.body_b.ang_vel += impulse * self.inv_inertia_b @ self.normal
+    def solve_normal(self):
+        if self.eff_mass_n == 0.0:
+            return
+        rel_v = self._relative_velocity()
+        v_rel_n = rel_v @ self.normal
+        # Compute impulse scalar
+        lambda_n = -(v_rel_n + self.velocity_bias) * self.eff_mass_n
+        # Accumulate (clamp to keep non-negative)
+        old_impulse = self.cp.normal_impulse
+        self.cp.normal_impulse = max(0.0, old_impulse + lambda_n)
+        delta = self.cp.normal_impulse - old_impulse
+        if abs(delta) > 0.0:
+            self._apply_impulse(self.normal * delta)
 
     def solve_friction(self):
-        """Solve friction constraints."""
-        # Get total normal impulse from associated contact points
-        total_normal_impulse = 0.0
-        for point in self.contact_points:
-            if point.constraint == self:
-                total_normal_impulse += point.contact.penetration_impulse
-    
-        friction_limit = self.friction_coeff * abs(total_normal_impulse)
-        
-        # Solve first friction direction
-        v_rel = self.compute_relative_velocity()
-        jv1 = np.dot(v_rel, self.friction_vector1)
-        
-        delta_lambda1 = -jv1 * self.inv_friction_mass1
-        old_impulse1 = self.manifold.friction_impulse1
-        self.manifold.friction_impulse1 = np.clip(old_impulse1 + delta_lambda1, 
-                                                  -friction_limit, friction_limit)
-        delta_lambda1 = self.manifold.friction_impulse1 - old_impulse1
-        
-        if abs(delta_lambda1) > 1e-10:
-            self.apply_friction_impulse(delta_lambda1 * self.friction_vector1)
-        
-        # Solve second friction direction
-        v_rel = self.compute_relative_velocity()
-        jv2 = np.dot(v_rel, self.friction_vector2)
-        
-        delta_lambda2 = -jv2 * self.inv_friction_mass2
-        old_impulse2 = self.manifold.friction_impulse2
-        self.manifold.friction_impulse2 = np.clip(old_impulse2 + delta_lambda2, 
-                                                  -friction_limit, friction_limit)
-        delta_lambda2 = self.manifold.friction_impulse2 - old_impulse2
-        
-        if abs(delta_lambda2) > 1e-10:
-            self.apply_friction_impulse(delta_lambda2 * self.friction_vector2)
-        
-        # Solve twist friction
-        ang_vel_rel = self.body_b.ang_vel - self.body_a.ang_vel
-        jv_twist = np.dot(ang_vel_rel, self.normal)
-        
-        delta_lambda_twist = -jv_twist * self.inv_twist_mass
-        old_twist = self.manifold.friction_twist_impulse
-        self.manifold.friction_twist_impulse = np.clip(old_twist + delta_lambda_twist,
-                                                       -friction_limit, friction_limit)
-        delta_lambda_twist = self.manifold.friction_twist_impulse - old_twist
-        
-        if abs(delta_lambda_twist) > 1e-10:
-            self.apply_twist_impulse(delta_lambda_twist)
+        # Only apply friction if there is normal impulse
+        normal_impulse = self.cp.normal_impulse
+        if normal_impulse <= 0.0:
+            return
 
-# ---------------------------------------------------------------------
-# Debug flags
-DEBUG_GENERIC_CONTACT = True        # ← set to False to silence logs
-# ---------------------------------------------------------------------
+        max_friction = self.manifold.friction * normal_impulse
 
-def clamp(value, min_value, max_value):
-    """Clamp a value between min_value and max_value."""
-    return max(min_value, min(value, max_value))
+        # Tangent 1
+        if self.eff_mass_t1 > 0.0:
+            rel_v = self._relative_velocity()
+            vt1 = rel_v @ self.t1
+            lambda_t1 = -vt1 * self.eff_mass_t1
+            old = self.cp.tangent_impulse1
+            self.cp.tangent_impulse1 = clamp(old + lambda_t1, -max_friction, max_friction)
+            delta = self.cp.tangent_impulse1 - old
+            if abs(delta) > 0.0:
+                self._apply_impulse(self.t1 * delta)
 
+        # Tangent 2
+        if self.eff_mass_t2 > 0.0:
+            rel_v = self._relative_velocity()
+            vt2 = rel_v @ self.t2
+            lambda_t2 = -vt2 * self.eff_mass_t2
+            old2 = self.cp.tangent_impulse2
+            self.cp.tangent_impulse2 = clamp(old2 + lambda_t2, -max_friction, max_friction)
+            delta2 = self.cp.tangent_impulse2 - old2
+            if abs(delta2) > 0.0:
+                self._apply_impulse(self.t2 * delta2)
+
+    def _apply_impulse(self, impulse):
+        if self.body_a and self.body_a.body_type == Body.DYNAMIC:
+            self.body_a.vel -= impulse * self.body_a.inv_mass
+            self.body_a.ang_vel -= self.body_a.inv_inertia_world() @ np.cross(self.r_a, impulse)
+        if self.body_b and self.body_b.body_type == Body.DYNAMIC:
+            self.body_b.vel += impulse * self.body_b.inv_mass
+            self.body_b.ang_vel += self.body_b.inv_inertia_world() @ np.cross(self.r_b, impulse)
+
+class ContactManifoldConstraint:
+    def __init__(self, manifold: ContactManifold):
+        self.manifold = manifold
+        self.body_a = manifold.body_a
+        self.body_b = manifold.body_b
+        # Take normal from first contact (all share)
+        if manifold.points:
+            self.normal = normalize(manifold.points[0].normal)
+        else:
+            self.normal = np.array([0.0, 1.0, 0.0])
+        # Build tangent basis
+        self.t1, self.t2 = build_tangent_basis(self.normal)
+
+        # Friction & restitution
+        fr_a = getattr(manifold.collider_a.material, 'friction', 0.5) if manifold.collider_a else 0.5
+        fr_b = getattr(manifold.collider_b.material, 'friction', 0.5) if manifold.collider_b else 0.5
+        self.friction = np.sqrt(fr_a * fr_b)
+
+        e_a = getattr(manifold.collider_a.material, 'elasticity', 0.0) if manifold.collider_a else 0.0
+        e_b = getattr(manifold.collider_b.material, 'elasticity', 0.0) if manifold.collider_b else 0.0
+        self.restitution = max(e_a, e_b)
+
+        # Per-point constraints
+        self.point_constraints: list[ContactPointConstraint] = []
+        for cp in manifold.points:
+            self.point_constraints.append(ContactPointConstraint(self, cp))
+
+    def warm_start(self):
+        for pc in self.point_constraints:
+            pc.warm_start()
+
+    def solve(self):
+        # Solve normal first for all points (block solver optional)
+        for pc in self.point_constraints:
+            pc.solve_normal()
+        # Then friction for all
+        for pc in self.point_constraints:
+            pc.solve_friction()
+
+# -----------------------------------------------------------
+# Solver
+# -----------------------------------------------------------
+class ContactSolver:
+    def __init__(self, use_split_impulse=False):
+        self.use_split_impulse = use_split_impulse
+        self.manifold_constraints: list[ContactManifoldConstraint] = []
+
+    def init_constraints(self, manifolds):
+        self.manifold_constraints.clear()
+        for m in manifolds:
+            if not m.points:
+                continue
+            self.manifold_constraints.append(ContactManifoldConstraint(m))
+
+    def warm_start(self):
+        for mc in self.manifold_constraints:
+            mc.warm_start()
+
+    def solve(self, manifolds, dt, iterations=10):
+        if not manifolds:
+            return
+        self.init_constraints(manifolds)
+        self.warm_start()
+        for _ in range(iterations):
+            for mc in self.manifold_constraints:
+                mc.solve()
+
+# -----------------------------------------------------------
+# Utility math
+# -----------------------------------------------------------
+def normalize(v):
+    v = np.asarray(v, dtype=float)
+    n = np.linalg.norm(v)
+    if n < 1e-12:
+        return np.array([0.0, 0.0, 0.0])
+    return v / n
+
+def build_tangent_basis(n):
+    n = normalize(n)
+    if abs(n[0]) < 0.9:
+        other = np.array([1.0, 0.0, 0.0])
+    else:
+        other = np.array([0.0, 1.0, 0.0])
+    t1 = normalize(np.cross(n, other))
+    t2 = normalize(np.cross(n, t1))
+    return t1, t2
+
+# -----------------------------------------------------------
+# Legacy single contact resolution (still callable)
+# -----------------------------------------------------------
 def resolve_plane_contact(plane_contact, dynamic_body, plane_body, dt):
-    """
-    Specialized contact resolution for a dynamic body against a static plane.
-    """
-    # print("\n=== PLANE CONTACT RESOLUTION DEBUG ===")
-    # print(f"Dynamic body position: {dynamic_body.pos}")
-    # print(f"Plane body position: {plane_body.pos}")
-    # print(f"Initial contact normal: {plane_contact.normal}")
-    # print(f"Contact point on plane: {plane_contact.contact_a}")
-    # print(f"Contact point on object: {plane_contact.contact_b}")
-    # print(f"Initial penetration depth: {plane_contact.depth}")
-    
-    # Ensure the normal points from the plane towards the dynamic body
-    normal_check = np.dot(plane_contact.normal, (dynamic_body.pos - plane_body.pos))
-    # print(f"Normal direction check: {normal_check}")
-    
-    if normal_check < 0:
-        # print("WARNING: Flipping normal direction!")
-        plane_contact.normal *= -1.0
-        # print(f"Corrected normal: {plane_contact.normal}")
+    # Fallback simple impulse resolution with positional correction
+    normal = plane_contact.normal
+    rel_vel_n = dynamic_body.vel @ normal
+    if rel_vel_n < 0.0:
+        inv_mass = dynamic_body.inv_mass
+        j = -(1.0 + 0.0) * rel_vel_n / (inv_mass)
+        impulse = j * normal
+        dynamic_body.vel += impulse * inv_mass
+    # Positional correction
+    if plane_contact.depth > SLOP:
+        correction = (plane_contact.depth - SLOP) * 0.8
+        dynamic_body.position += normal * correction
 
-    # Relative velocity calculation
-    r_b = plane_contact.contact_b - dynamic_body.pos
-    # print(f"r_b vector: {r_b}")
-    
-    v_b = dynamic_body.vel + np.cross(dynamic_body.ang_vel, r_b)
-    # print(f"Dynamic body velocity: {dynamic_body.vel}")
-    # print(f"Dynamic body angular velocity: {dynamic_body.ang_vel}")
-    # print(f"Total point velocity: {v_b}")
-    
-    normal_vel = np.dot(v_b, plane_contact.normal)
-    # print(f"Normal velocity: {normal_vel}")
-
-    # Resolve only if approaching
-    if normal_vel >= 0:
-        # print("Objects separating, skipping resolution")
+def resolve_generic_contact(contact: Contact, dt):
+    a = contact.body_a
+    b = contact.body_b
+    if a is None or b is None:
+        return
+    if a.body_type != Body.DYNAMIC and b.body_type != Body.DYNAMIC:
         return
 
-    # Simplified effective mass for one dynamic body
-    inv_mass_b = dynamic_body.inv_mass
-    # print(f"Inverse mass: {inv_mass_b}")
-    
-    inv_inertia_b = dynamic_body.inv_inertia_world()
-    # print(f"Inverse inertia tensor: {inv_inertia_b}")
-    
-    r_b_cross_n = np.cross(r_b, plane_contact.normal)
-    # print(f"r_b × normal: {r_b_cross_n}")
-    
-    angular_effect_b = np.dot(np.cross(inv_inertia_b @ r_b_cross_n, r_b), plane_contact.normal)
-    # print(f"Angular effect term: {angular_effect_b}")
-    
-    inv_effective_mass = inv_mass_b + angular_effect_b
-    # print(f"Inverse effective mass: {inv_effective_mass}")
+    n = normalize(contact.normal)
+    ra = contact.contact_a - a.position
+    rb = contact.contact_b - b.position
 
-    if inv_effective_mass < 1e-6:
-        # print("Effective mass too small, skipping resolution")
+    va = a.vel + np.cross(a.ang_vel, ra)
+    vb = b.vel + np.cross(b.ang_vel, rb)
+    rel_v = vb - va
+    rel_n = rel_v @ n
+    if rel_n > 0.0:
         return
 
-    # Impulse calculation
-    restitution = 0.3
-    
-    # --- CHANGE: Improve impulse calculation to reduce jittering ---
-    # 1. Eliminate restitution at low velocities to prevent micro-bounces
-    if abs(normal_vel) < 0.2:
-        restitution = 0.0
-    
-    j = -(1.0 + restitution) * normal_vel / inv_effective_mass
-    impulse = j * plane_contact.normal
+    inv_mass = 0.0
+    if a.body_type == Body.DYNAMIC:
+        inv_mass += a.inv_mass + np.cross(ra, n) @ (a.inv_inertia_world() @ np.cross(ra, n))
+    if b.body_type == Body.DYNAMIC:
+        inv_mass += b.inv_mass + np.cross(rb, n) @ (b.inv_inertia_world() @ np.cross(rb, n))
+    if inv_mass < 1e-12:
+        return
+    j = -(1.0 + 0.0) * rel_n / inv_mass
 
-    # Apply impulse to the dynamic body
-    dynamic_body.vel += inv_mass_b * impulse
-    dynamic_body.ang_vel += inv_inertia_b @ np.cross(r_b, impulse)
-    
-    # 2. Apply damping for near-resting objects
-    if abs(normal_vel) < 0.5:
-        # Apply stronger damping the slower the object is moving
-        damping_factor = 1.0 - min(abs(normal_vel), 0.2) / 0.5
-        
-        # Linear damping (more aggressive as velocity approaches zero)
-        vel_magnitude = np.linalg.norm(dynamic_body.vel)
-        if vel_magnitude < 0.5:
-            damping_strength = 0.95 - (damping_factor * 0.1)  # 0.85-0.95 range
-            dynamic_body.vel *= damping_strength
-            
-        # Angular damping (more aggressive)
-        ang_vel_magnitude = np.linalg.norm(dynamic_body.ang_vel)
-        if ang_vel_magnitude < 1.0:
-            ang_damping = 0.9 - (damping_factor * 0.15)  # 0.75-0.9 range
-            dynamic_body.ang_vel *= ang_damping
-    
-    # --- CHANGE: Improve positional correction to be more stable ---
-    # Positional correction (Baumgarte stabilization)
-    penetration_slop = 0.005  # Small slop to prevent jitter
-    
-    # 1. Calculate velocity along normal direction
-    normal_velocity_magnitude = abs(normal_vel)
-    
-    # 2. Use an adaptive correction percent based on velocity
-    # Higher velocity -> stronger correction to prevent tunneling
-    base_percent = 0.8  # Base correction strength 
-    velocity_scale = min(1.0, normal_velocity_magnitude / 5.0)  # Scale up to 1.0
-    percent = base_percent + (velocity_scale * 0.4)  # Can go up to 1.2 for very fast objects
-    
-    # 3. Apply position correction with safety margin
-    if plane_contact.depth > penetration_slop:
-        # Basic correction based on penetration
-        correction_depth = plane_contact.depth - penetration_slop
-        
-        # Add velocity-based safety margin to prevent tunneling
-        # For fast-moving objects, push them further from the plane
-        safety_margin = min(0.05, normal_velocity_magnitude * dt * 0.5)
-        total_correction = correction_depth + safety_margin
-        
-        # Apply the correction
-        correction_magnitude = (total_correction / inv_effective_mass) * percent
-        correction = correction_magnitude * plane_contact.normal
-        
-        # Apply position correction
-        dynamic_body.pos += inv_mass_b * correction
-        
-    # --- HIGH-VELOCITY STABILIZATION ---
-    # For very fast-moving objects, add extra constraints
-    if normal_velocity_magnitude > 10.0:
-        # Cap maximum velocity to prevent extreme tunneling
-        max_speed = 20.0
-        if np.linalg.norm(dynamic_body.vel) > max_speed:
-            dynamic_body.vel = dynamic_body.vel * (max_speed / np.linalg.norm(dynamic_body.vel))
-            
-        # For extremely fast objects, use smaller timesteps internally
-        # by subdividing the impulse across multiple sub-steps
-        sub_steps = min(5, int(normal_velocity_magnitude / 5.0))
-        if sub_steps > 1:
-            sub_dt = dt / sub_steps
-            sub_impulse = impulse / sub_steps
-            
-            # Re-apply fractions of the impulse
-            for _ in range(1, sub_steps):
-                # Apply fraction of impulse
-                dynamic_body.vel += (inv_mass_b * sub_impulse) 
-                dynamic_body.ang_vel += inv_inertia_b @ np.cross(r_b, sub_impulse)
-                
-                # Move position slightly each sub-step
-                dynamic_body.pos += dynamic_body.vel * sub_dt
+    impulse = j * n
+    if a.body_type == Body.DYNAMIC:
+        a.vel -= impulse * a.inv_mass
+        a.ang_vel -= a.inv_inertia_world() @ np.cross(ra, impulse)
+    if b.body_type == Body.DYNAMIC:
+        b.vel += impulse * b.inv_mass
+        b.ang_vel += b.inv_inertia_world() @ np.cross(rb, impulse)
 
 def resolve_contact(contact, dt):
-    """Dispatches contact resolution to the appropriate function."""
-    # Since the Contact object is now standardized, we can access its
-    # attributes with confidence. No more guessing or hasattr checks.
-    
-    # --- Dispatcher Logic ---
-    # Case 1: Body A's shape is a plane, Body B is dynamic
-    if isinstance(contact.shape_a, Plane) and contact.body_b.body_type == Body.DYNAMIC:
-        resolve_plane_contact(contact, contact.body_b, contact.body_a, dt)
-        return
-
-    # Case 2: Body B's shape is a plane, Body A is dynamic
-    if isinstance(contact.shape_b, Plane) and contact.body_a.body_type == Body.DYNAMIC:
-        # Invert the contact normal to point from plane (B) to object (A)
-        contact.normal *= -1.0
-        resolve_plane_contact(contact, contact.body_a, contact.body_b, dt)
-        return
-        
-    # --- Fallback to Generic Resolution ---
     resolve_generic_contact(contact, dt)
-
-
-def resolve_generic_contact(contact, dt):
-    """Generic contact resolution for two dynamic or one dynamic/one static body."""
-    # --- Baumgarte Stabilization Constants ---
-    BETA = 0.2   # How aggressively to correct position errors
-    SLOP = 0.01  # Allowed penetration depth to prevent jittering
-
-    # Get bodies and their properties
-    body_a, body_b = contact.body_a, contact.body_b
-    inv_mass_a = body_a.inv_mass if body_a.body_type == Body.DYNAMIC else 0.0
-    inv_mass_b = body_b.inv_mass if body_b.body_type == Body.DYNAMIC else 0.0
-
-    if inv_mass_a == 0.0 and inv_mass_b == 0.0:
-        return  # Both bodies are static
-
-    # 1. -------------------------------- Relative velocity & effective mass
-    r_a = contact.contact_a - body_a.pos
-    r_b = contact.contact_b - body_b.pos
-
-    inv_inertia_a = body_a.inv_inertia_world() if body_a.body_type == Body.DYNAMIC else np.zeros((3, 3))
-    inv_inertia_b = body_b.inv_inertia_world() if body_b.body_type == Body.DYNAMIC else np.zeros((3, 3))
-
-    angular_effect_a = np.dot(np.cross(inv_inertia_a @ np.cross(r_a, contact.normal), r_a), contact.normal)
-    angular_effect_b = np.dot(np.cross(inv_inertia_b @ np.cross(r_b, contact.normal), r_b), contact.normal)
-    inv_effective_mass = inv_mass_a + inv_mass_b + angular_effect_a + angular_effect_b
-    if inv_effective_mass < 1e-6:
-        return
-
-    v_a = body_a.vel + np.cross(body_a.ang_vel, r_a)
-    v_b = body_b.vel + np.cross(body_b.ang_vel, r_b)
-    rel_vel   = v_b - v_a
-    normal_vel = np.dot(rel_vel, contact.normal)
-
-    # If velocities are separating, no impulse is needed.
-    if normal_vel > 0:
-        return
-
-    # 2. -------------------------------- Bias terms (restitution + Baumgarte)
-    restitution = 0.2
-    # Prevent bounce when objects are slow or resting
-    if abs(normal_vel) < 1.0:
-        restitution = 0.0
-        
-    positional_bias = (BETA / dt) * max(0.0, contact.depth - SLOP)
-
-    # 3. -------------------------------- Impulse
-    # --- FIX: Use the correct impulse formula ---
-    j_numerator = -(1.0 + restitution) * normal_vel + positional_bias
-    j = j_numerator / inv_effective_mass
-    
-    # The impulse must be repulsive. A small negative j can happen due to
-    # floating point errors when objects are separating, so clamp it.
-    j = max(0.0, j)
-
-    impulse = j * contact.normal*0.3
-
-    # 4. -------------------------------- Apply impulse
-    if body_a.body_type == Body.DYNAMIC:
-        body_a.vel     -= inv_mass_a * impulse
-        body_a.ang_vel -= inv_inertia_a @ np.cross(r_a, impulse)
-
-    if body_b.body_type == Body.DYNAMIC:
-        body_b.vel     += inv_mass_b * impulse
-        body_b.ang_vel += inv_inertia_b @ np.cross(r_b, impulse)
-
-    # 5. -------------------------------- Debug output
-    if DEBUG_GENERIC_CONTACT:
-        print("\n--- resolve_generic_contact() ---")
-        print(f"Contact normal            : {contact.normal}")
-        print(f"Penetration depth         : {contact.depth}")
-        print(f"Inv mass A / B            : {inv_mass_a} / {inv_mass_b}")
-        print(f"r_a / r_b                 : {r_a} / {r_b}")
-        print(f"Angular effect A / B      : {angular_effect_a} / {angular_effect_b}")
-        print(f"Inverse effective mass    : {inv_effective_mass}")
-        print(f"v_a / v_b                 : {v_a} / {v_b}")
-        print(f"Relative velocity         : {rel_vel}")
-        print(f"Normal relative velocity  : {normal_vel}")
-        print(f"Positional bias           : {positional_bias}")
-        print(f"Impulse magnitude (j)     : {j}")
-        print(f"Post-impulse vel/ang A    : {body_a.vel} / {body_a.ang_vel}")
-        print(f"Post-impulse vel/ang B    : {body_b.vel} / {body_b.ang_vel}")
