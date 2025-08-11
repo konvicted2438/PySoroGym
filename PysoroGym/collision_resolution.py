@@ -285,6 +285,39 @@ class ContactSolver:
             for mc in self.manifold_constraints:
                 mc.solve()
 
+        if self.use_split_impulse:
+            for mc in self.manifold_constraints:
+                for pc in mc.point_constraints:
+                    self.solve_split_impulse(pc, dt)
+
+    def solve_split_impulse(self, pc: ContactPointConstraint, dt: float):
+        """Applies a direct position correction impulse."""
+        if pc.cp.depth <= SLOP:
+            return
+
+        # Simplified position correction logic
+        baumgarte_bias = (BETA / dt) * max(0.0, pc.cp.depth - SLOP)
+        
+        # We need to re-calculate relative velocity at the contact point
+        # for the split impulse, but since we apply it to position, we can simplify.
+        # Here we calculate an impulse-like value to directly modify position.
+        # This is a simplified model.
+        
+        lambda_p = -baumgarte_bias * pc.eff_mass_n
+
+        # To avoid overcorrection, we can clamp the correction.
+        # For simplicity, we apply a fraction of the impulse directly.
+        # A more robust solution would use split velocities.
+        
+        correction = pc.normal * lambda_p * (dt * dt) # Heuristic scaling
+
+        # Apply positional correction
+        if pc.body_a and pc.body_a.body_type == Body.DYNAMIC:
+            pc.body_a.pos -= correction * pc.body_a.inv_mass
+        if pc.body_b and pc.body_b.body_type == Body.DYNAMIC:
+            pc.body_b.pos += correction * pc.body_b.inv_mass
+
+
 # -----------------------------------------------------------
 # Utility math
 # -----------------------------------------------------------
