@@ -20,7 +20,7 @@ for i in range(500):
     obs, reward, terminated, truncated, info = env.step(action)
     
     # Print progress every 50 steps
-    if i % 50 == 0:
+    if i % 5 == 0:
         print(f"Step {i}: Distance to target: {info['distance_to_target']:.3f}, Reward: {reward:.3f}")
     
     if terminated:

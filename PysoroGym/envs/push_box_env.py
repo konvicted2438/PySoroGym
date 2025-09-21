@@ -72,8 +72,8 @@ class PushBoxEnv(gym.Env):
         
         # Initial positions
         self.robot_start_pos = np.array([0.0, 0.8, 0.0])
-        self.box_start_pos = np.array([0.25, 0, 0.25])
-        self.target_pos = np.array([0.4, 0.0, 0.0])  # Only x,z matter for success
+        self.box_start_pos = np.array([0.3, 0, 0])
+        self.target_pos = np.array([0.5, 0.0, 0.5])  # Only x,z matter for success
         
         # Initialize environment
         self._setup_world()
@@ -192,13 +192,24 @@ class PushBoxEnv(gym.Env):
         # Main reward: negative distance from box to target
         reward = -box_to_target_2d
         
-        # Encourage robot to be close to box (but not too close)
-        optimal_distance = 0.08  # Slightly more than box radius
-        distance_error = abs(robot_to_box - optimal_distance)
-        if distance_error < 0.05:
-            reward += 0.2
+        # Contact reward: encourage robot to touch but not penetrate the box
+        # Box radius is half of box_size
+        box_radius = self.box_size / 2
+        # Ideal distance is when the tip is just touching the box surface
+        ideal_contact_distance = box_radius
+        
+        # Calculate contact reward
+        if robot_to_box < ideal_contact_distance - 0.01:
+            # Penalty for penetration - increases as penetration depth increases
+            penetration_depth = ideal_contact_distance - robot_to_box
+            reward -= 2.0 * penetration_depth  # Strong penalty for penetration
+        elif robot_to_box < ideal_contact_distance + 0.03:
+            # Reward for being very close to ideal contact
+            reward += 0.5
         else:
-            reward -= 0.1 * distance_error
+            # Penalty for being too far, proportional to distance
+            distance_error = robot_to_box - ideal_contact_distance
+            reward -= 0.2 * distance_error
         
         # Big bonus for success
         if box_to_target_2d < self.success_threshold:
